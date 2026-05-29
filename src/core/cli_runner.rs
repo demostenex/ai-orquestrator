@@ -4,6 +4,8 @@ use std::process::{Command, Stdio};
 use anyhow::{anyhow, Result};
 use colored::Colorize;
 
+use crate::core::session::PtySession;
+
 /// CLIs conhecidos e como passam o prompt (via stdin)
 const KNOWN_CLIS: &[(&str, &str)] = &[
     ("gemini",   "Google Gemini CLI"),
@@ -131,5 +133,49 @@ pub fn run_cli(cli_cmd: &str, prompt: &str) -> Result<String> {
         return Err(anyhow!("CLI '{cli_cmd}' retornou exit code {}", status));
     }
 
+    Ok(full_output)
+}
+
+/// Envia o prompt para uma sessão PTY existente e lê a resposta até detectar que a IA parou de escrever.
+/// A sessão permanece ativa (em background) para próximos turnos.
+pub fn run_cli_session(session: &mut PtySession, prompt: &str, timeout_ms: u64) -> Result<String> {
+    // Envia o prompt para a sessão ativa
+    session.send(prompt)?;
+    
+    // Como CLIs de IA em PTY costumam ser iterativos, eles imprimem as respostas e depois exibem um novo
+    // prompt de entrada (ex: "❯ " ou "Claude> ") aguardando o usuário.
+    // Em V1, vamos ler e drenar o output periodicamente. Retornamos quando o output ficar ocioso por um
+    // tempo mínimo após começar a chegar, ou se atingir um limite.
+    
+    let mut full_output = String::new();
+    let mut idle_count = 0;
+    let mut wait_count = 0;
+    const MAX_WAIT_CYCLES: u64 = 30; // Limite de espera (ex: 30 * timeout_ms)
+    
+    // Loop de leitura não-bloqueante (drenagem)
+    loop {
+        let chunk = session.read_output(timeout_ms)?;
+        
+        if !chunk.is_empty() {
+            print!("{}", chunk.dimmed()); // Imprime chunk purificado para o usuário acompanhar
+            std::io::stdout().flush().ok();
+            full_output.push_str(&chunk);
+            idle_count = 0; // reset
+            wait_count = 0; // reset na espera inicial
+        } else {
+            idle_count += 1;
+            // Se já leu alguma coisa e o buffer secou (idle por 3 ciclos de timeout), assumimos que a IA terminou o turno.
+            if !full_output.is_empty() && idle_count >= 3 {
+                break;
+            }
+            
+            wait_count += 1;
+            if wait_count >= MAX_WAIT_CYCLES {
+                anyhow::bail!("Timeout: IA não respondeu após {} ciclos", MAX_WAIT_CYCLES);
+            }
+        }
+    }
+    println!(); // Quebra de linha final para a TUI do orquestrador
+    
     Ok(full_output)
 }
