@@ -88,6 +88,12 @@ pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan
 
     // ── Plano: digitar no terminal se não existe ou --new-plan ────────────────
     let plan = if new_plan || !plan_path.exists() {
+        if new_plan {
+            print_warning("--new-plan está depreciado (decisão O1 do Passo 4).");
+            println!("  Use {} no futuro para criar planos.", "ai-orchestrator plan new".cyan());
+            println!();
+        }
+
         println!("\n{}", "══════════════════════════════════════".bold());
         println!("{}", "📋  NOVO PLANO".bold().cyan());
         println!("{}", "══════════════════════════════════════".bold());

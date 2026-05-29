@@ -60,7 +60,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: SessionCommands,
     },
-    Plan(PlanArgs),
+    Plan {
+        #[command(subcommand)]
+        command: PlanCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -71,8 +74,14 @@ pub enum SessionCommands {
     Kill { pid: u32 },
 }
 
-#[derive(Debug, clap::Args)]
-pub struct PlanArgs {}
+#[derive(Debug, Subcommand)]
+pub enum PlanCommands {
+    #[command(about = "Cria um novo plano de alto nível")]
+    New {
+        #[arg(short, long, help = "Título descritivo do plano")]
+        title: Option<String>,
+    },
+}
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -87,6 +96,6 @@ pub async fn run() -> Result<()> {
             SessionCommands::List => crate::commands::session::list().await,
             SessionCommands::Kill { pid } => crate::commands::session::kill(pid).await,
         },
-        Commands::Plan(args) => commands::plan::execute(args).await,
+        Commands::Plan { command } => commands::plan::execute(command).await,
     }
 }
