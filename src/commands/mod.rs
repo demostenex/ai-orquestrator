@@ -1,0 +1,261 @@
+pub mod apply;
+pub mod audit;
+pub mod init;
+pub mod run;
+pub mod status;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use chrono::Utc;
+use colored::Colorize;
+use serde::Serialize;
+
+use crate::schemas::CycleState;
+
+pub(crate) fn read_to_string(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("failed to read file {}", path.display()))
+}
+
+pub(crate) fn write_string(path: &Path, content: &str) -> Result<()> {
+    fs::write(path, content).with_context(|| format!("failed to write file {}", path.display()))
+}
+
+pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let content = serde_json::to_string_pretty(value)?;
+    write_string(path, &content)
+}
+
+pub(crate) fn save_cycle(orchestrator_dir: &Path, cycle: &CycleState) -> Result<()> {
+    let path = orchestrator_dir.join("current-cycle.json");
+    write_json(&path, cycle)
+}
+
+pub(crate) fn load_cycle(orchestrator_dir: &Path) -> Result<CycleState> {
+    let path = orchestrator_dir.join("current-cycle.json");
+    let raw = read_to_string(&path)?;
+    let cycle: CycleState = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse cycle state {}", path.display()))?;
+    cycle.validate()?;
+    Ok(cycle)
+}
+
+pub(crate) fn status_label(ok: bool) -> String {
+    if ok {
+        "clean".green().to_string()
+    } else {
+        "dirty".red().to_string()
+    }
+}
+
+pub(crate) fn print_step(message: &str) {
+    println!("{} {}", "→".blue(), message);
+}
+
+pub(crate) fn print_success(message: &str) {
+    println!("{} {}", "✔".green(), message);
+}
+
+pub(crate) fn print_warning(message: &str) {
+    println!("{} {}", "⚠".yellow(), message);
+}
+
+pub(crate) fn now_string() -> String {
+    Utc::now().to_rfc3339()
+}
+
+/// Lê uma linha do stdin de forma bloqueante (seguro para usar em contexto async via spawn_blocking).
+fn read_line_blocking() -> Result<String> {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim_end_matches('\n').trim_end_matches('\r').to_string())
+}
+
+/// Lê linhas do stdin até linha vazia. Retorna o texto concatenado.
+fn read_multiline_blocking() -> Result<String> {
+    let mut lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
+        if trimmed.is_empty() {
+            break;
+        }
+        lines.push(trimmed);
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Exibe o conteúdo com limite de linhas e oferece continuar ou truncar.
+fn print_content_preview(content: &str, max_lines: usize) {
+    let lines: Vec<&str> = content.lines().collect();
+    let shown = lines.len().min(max_lines);
+    for line in &lines[..shown] {
+        println!("{}", line.dimmed());
+    }
+    if lines.len() > max_lines {
+        println!(
+            "{} ({} linhas truncadas — arquivo completo no mailbox)",
+            "...".dimmed(),
+            lines.len() - max_lines
+        );
+    }
+}
+
+/// Portão interativo: exibe conteúdo, permite adicionar informações e confirma antes de passar.
+/// Retorna o conteúdo original + adições do usuário (se houver).
+pub(crate) async fn interactive_gate(
+    label: &str,
+    content: &str,
+    direction: &str, // ex: "Dev → Auditora", "Orquestrador → Dev"
+) -> Result<String> {
+    let sep = "══════════════════════════════════════".bold();
+    println!("\n{sep}");
+    println!("{}", format!("📋  PORTÃO — {label}").bold().cyan());
+    println!("{}", format!("    {direction}").dimmed());
+    println!("{sep}");
+    print_content_preview(content, 60);
+    println!("{sep}");
+
+    // Pergunta se quer adicionar informações
+    let additions = tokio::task::spawn_blocking(|| -> Result<Option<String>> {
+        print!(
+            "\n{} Deseja adicionar informações antes de passar? [s/{}]: ",
+            "❓".yellow(),
+            "N".bold()
+        );
+        // flush
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+
+        let answer = read_line_blocking()?;
+        if answer.trim().to_lowercase() == "s" {
+            println!(
+                "{} Digite (uma linha vazia finaliza):",
+                "✏".green()
+            );
+            let text = read_multiline_blocking()?;
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        } else {
+            Ok(None)
+        }
+    })
+    .await??;
+
+    let enriched = if let Some(extra) = additions {
+        println!("{} Informações adicionadas ao contexto.", "✔".green());
+        format!("{content}\n\n[NOTAS DO HUMANO]\n{extra}")
+    } else {
+        content.to_string()
+    };
+
+    // Confirmação final para passar
+    tokio::task::spawn_blocking(|| -> Result<()> {
+        print!(
+            "\n{} Pressione {} para passar adiante (ou {} para abortar): ",
+            "▶".green(),
+            "Enter".bold().green(),
+            "Ctrl+C".red()
+        );
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        read_line_blocking()?;
+        Ok(())
+    })
+    .await??;
+
+    println!("{} Passou! Seguindo...\n", "✔".green());
+    Ok(enriched)
+}
+
+/// Aguarda um arquivo aparecer no sistema de arquivos (modo manual).
+/// Faz polling a cada 2 segundos com timeout de `max_wait_secs`.
+pub(crate) async fn wait_for_file(path: &Path, max_wait_secs: u64) -> Result<()> {
+    let mut elapsed = 0u64;
+    while elapsed < max_wait_secs {
+        if path.exists() && fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        elapsed += 2;
+        if elapsed % 10 == 0 {
+            println!(
+                "{} aguardando {} ({elapsed}s)...",
+                "⏳".yellow(),
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+    anyhow::bail!(
+        "timeout: arquivo não criado em {max_wait_secs}s: {}",
+        path.display()
+    )
+}
+
+/// Exibe instruções para o usuário executar o CLI externo e salvar a resposta.
+pub(crate) fn print_manual_instructions(
+    agent_label: &str,
+    prompt_file: &Path,
+    response_file: &Path,
+) {
+    let separator = "══════════════════════════════════════".bold();
+    println!("\n{separator}");
+    println!("{}", format!("MODO MANUAL — {agent_label}").bold().yellow());
+    println!("{separator}");
+    println!(
+        "Prompt salvo em:\n  {}\n",
+        prompt_file.display().to_string().cyan()
+    );
+    println!("Execute em outro terminal:");
+    println!(
+        "  {} {}\n",
+        "cat".dimmed(),
+        prompt_file.display().to_string().cyan()
+    );
+    println!("  (ou pipe direto para o seu CLI: gemini, claude, copilot)\n");
+    println!("Salve a resposta JSON em:");
+    println!("  {}\n", response_file.display().to_string().green());
+    println!(
+        "{}",
+        "O orquestrador está aguardando o arquivo ser criado...".dimmed()
+    );
+    println!("{separator}\n");
+}
+
+pub(crate) fn latest_patch_file(orchestrator_dir: &Path) -> Result<Option<PathBuf>> {
+    let patches_dir = orchestrator_dir.join("patches");
+    if !patches_dir.exists() {
+        return Ok(None);
+    }
+
+    let mut latest: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in fs::read_dir(&patches_dir)
+        .with_context(|| format!("failed to read directory {}", patches_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("diff") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .with_context(|| format!("failed to read metadata for {}", path.display()))?
+            .modified()
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let should_replace = latest
+            .as_ref()
+            .map(|(_, current)| modified > *current)
+            .unwrap_or(true);
+        if should_replace {
+            latest = Some((path, modified));
+        }
+    }
+
+    Ok(latest.map(|entry| entry.0))
+}

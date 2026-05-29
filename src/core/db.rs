@@ -1,8 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::params;
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::core::compute_sha256;
 
@@ -53,7 +55,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     run_id       TEXT NOT NULL REFERENCES runs(id),
     from_agent   TEXT NOT NULL,
     to_agent     TEXT NOT NULL,
-    status       TEXT NOT NULL,
+    status       TEXT NOT NULL,      -- "waiting_audit" | "approved" | "rejected" | "ready_for_dev" | "waiting_human"
     summary      TEXT,
     decisions    TEXT,               -- JSON array serializado
     risks        TEXT,               -- JSON array serializado
@@ -194,11 +196,11 @@ pub struct RunRow {
 
 // ── Handle do banco ───────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct Db {
-    conn: Connection,
+    pool: Pool<SqliteConnectionManager>,
     project_id: String,
     run_id: String,
-    sequence: i64,
 }
 
 impl Db {
@@ -215,11 +217,14 @@ impl Db {
         memory_hash: &str,
     ) -> Result<Self> {
         let db_path = orchestrator_dir.join("history.db");
-        let conn = Connection::open(&db_path)?;
+        
+        // C1: Habilitar modo WAL via with_init para propagar a todas as conexões do pool
+        let manager = SqliteConnectionManager::file(&db_path)
+            .with_init(|c| c.pragma_update(None, "journal_mode", "WAL"));
+        
+        let pool = Pool::new(manager)?;
 
-        // Habilitar modo WAL antes de executar o schema (CA2)
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-
+        let conn = pool.get()?;
         conn.execute_batch(SCHEMA)?;
 
         let workspace_str = workspace_path.to_string_lossy().to_string();
@@ -255,16 +260,15 @@ impl Db {
         )?;
 
         Ok(Self {
-            conn,
+            pool,
             project_id,
             run_id: run_id.to_string(),
-            sequence: 0,
         })
     }
 
     /// Registra um evento na fila ordenada do run.
-    pub fn log_event(
-        &mut self,
+    pub async fn log_event(
+        &self,
         event_type: EventType,
         from_agent: Option<&str>,
         to_agent: Option<&str>,
@@ -273,69 +277,77 @@ impl Db {
         enriched_by_human: bool,
         human_notes: Option<&str>,
     ) -> Result<()> {
-        self.sequence += 1;
-        let now = Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT INTO events
-             (project_id, run_id, sequence, event_type, from_agent, to_agent,
-              content_summary, content_hash, enriched_by_human, human_notes, timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                self.project_id,
-                self.run_id,
-                self.sequence,
-                event_type.as_str(),
-                from_agent,
-                to_agent,
-                content_summary,
-                content_hash,
-                enriched_by_human as i64,
-                human_notes,
-                now,
-            ],
-        )?;
-        Ok(())
+        let pool = self.pool.clone();
+        let pid = self.project_id.clone();
+        let rid = self.run_id.clone();
+        let etype = event_type.as_str().to_string();
+        let from = from_agent.map(|s| s.to_string());
+        let to = to_agent.map(|s| s.to_string());
+        let summary = content_summary.map(|s| s.to_string());
+        let hash = content_hash.map(|s| s.to_string());
+        let notes = human_notes.map(|s| s.to_string());
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let sequence: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ?1",
+                params![rid],
+                |r| r.get(0)
+            )?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO events
+                 (project_id, run_id, sequence, event_type, from_agent, to_agent,
+                  content_summary, content_hash, enriched_by_human, human_notes, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![pid, rid, sequence, etype, from, to, summary, hash, enriched_by_human as i64, notes, now],
+            )?;
+            Ok(())
+        }).await?
     }
 
     /// Registra um handoff.
-    pub fn log_handoff(
+    pub async fn log_handoff(
         &self,
         from_agent: &str,
         to_agent: &str,
         status: &str,
         summary: &str,
-        decisions: &[String],
-        risks: &[String],
-        open_questions: &[String],
-        files_touched: &[String],
+        decisions: Vec<String>,
+        risks: Vec<String>,
+        open_questions: Vec<String>,
+        files_touched: Vec<String>,
         next_action: &str,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT INTO handoffs
-             (project_id, run_id, from_agent, to_agent, status, summary,
-              decisions, risks, open_questions, files_touched, next_action, timestamp)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                self.project_id,
-                self.run_id,
-                from_agent,
-                to_agent,
-                status,
-                summary,
-                serde_json::to_string(decisions).unwrap_or_default(),
-                serde_json::to_string(risks).unwrap_or_default(),
-                serde_json::to_string(open_questions).unwrap_or_default(),
-                serde_json::to_string(files_touched).unwrap_or_default(),
-                next_action,
-                now,
-            ],
-        )?;
-        Ok(())
+        let pool = self.pool.clone();
+        let pid = self.project_id.clone();
+        let rid = self.run_id.clone();
+        let from = from_agent.to_string();
+        let to = to_agent.to_string();
+        let st = status.to_string();
+        let sum = summary.to_string();
+        let dec = serde_json::to_string(&decisions)?;
+        let rsk = serde_json::to_string(&risks)?;
+        let qst = serde_json::to_string(&open_questions)?;
+        let fls = serde_json::to_string(&files_touched)?;
+        let nxt = next_action.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO handoffs
+                 (project_id, run_id, from_agent, to_agent, status, summary,
+                  decisions, risks, open_questions, files_touched, next_action, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![pid, rid, from, to, st, sum, dec, rsk, qst, fls, nxt, now],
+            )?;
+            Ok(())
+        }).await?
     }
 
     /// Atualiza o status e campos finais do run corrente.
-    pub fn update_run_status(
+    pub async fn update_run_status(
         &self,
         status: &str,
         patch_hash: Option<&str>,
@@ -343,117 +355,221 @@ impl Db {
         audit_score: Option<i64>,
         memory_hash: Option<&str>,
     ) -> Result<()> {
-        let now = Utc::now().to_rfc3339();
-        self.conn.execute(
-            "UPDATE runs SET status = ?1, patch_hash = COALESCE(?2, patch_hash),
-             audit_approved = COALESCE(?3, audit_approved),
-             audit_score = COALESCE(?4, audit_score),
-             memory_hash = COALESCE(?5, memory_hash),
-             updated_at = ?6
-             WHERE id = ?7",
-            params![
-                status,
-                patch_hash,
-                audit_approved.map(|v| v as i64),
-                audit_score,
-                memory_hash,
-                now,
-                self.run_id,
-            ],
-        )?;
-        Ok(())
+        let pool = self.pool.clone();
+        let rid = self.run_id.clone();
+        let st = status.to_string();
+        let phash = patch_hash.map(|s| s.to_string());
+        let approved = audit_approved.map(|v| v as i64);
+        let score = audit_score;
+        let mhash = memory_hash.map(|s| s.to_string());
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE runs SET status = ?1, patch_hash = COALESCE(?2, patch_hash),
+                 audit_approved = COALESCE(?3, audit_approved),
+                 audit_score = COALESCE(?4, audit_score),
+                 memory_hash = COALESCE(?5, memory_hash),
+                 updated_at = ?6
+                 WHERE id = ?7",
+                params![st, phash, approved, score, mhash, now, rid],
+            )?;
+            Ok(())
+        }).await?
+    }
+
+    // ── Novos Métodos CRUD (Passo 1.3) ─────────────────────────────────────────
+
+    pub async fn create_plan(&self, plan_id: &str, title: &str) -> Result<()> {
+        let pool = self.pool.clone();
+        let pid = self.project_id.clone();
+        let rid = self.run_id.clone();
+        let id = plan_id.to_string();
+        let t = title.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO plans (id, project_id, run_id, title, status, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, 'draft', ?5, ?5)",
+                params![id, pid, rid, t, now],
+            )?;
+            Ok(())
+        }).await?
+    }
+
+    pub async fn add_plan_turn(&self, plan_id: &str, agent: &str, prompt: &str, content: &str) -> Result<()> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+        let ag = agent.to_string();
+        let p = prompt.to_string();
+        let c = content.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let sequence: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM plan_turns WHERE plan_id = ?1",
+                params![plid],
+                |r| r.get(0)
+            )?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO plan_turns (plan_id, sequence, agent, prompt, content, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![plid, sequence, ag, p, c, now],
+            )?;
+            Ok(())
+        }).await?
+    }
+
+    pub async fn add_task(&self, task_id: &str, plan_id: &str, description: &str, assigned_to: Option<&str>, sequence: i64) -> Result<()> {
+        let pool = self.pool.clone();
+        let tid = task_id.to_string();
+        let plid = plan_id.to_string();
+        let desc = description.to_string();
+        let ass = assigned_to.map(|s| s.to_string());
+        
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO tasks (id, plan_id, description, status, assigned_to, sequence, write_locked, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, 'pending', ?4, ?5, 0, ?6, ?6)",
+                params![tid, plid, desc, ass, sequence, now],
+            )?;
+            Ok(())
+        }).await?
+    }
+
+    pub async fn update_task_status(&self, agent_name: &str, task_id: &str, status: &str) -> Result<()> {
+        let pool = self.pool.clone();
+        let agent = agent_name.to_string();
+        let tid = task_id.to_string();
+        let st = status.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            
+            // CA3: Validação de write_locked - Permitir somente IA Dev se bloqueado
+            let is_locked: bool = conn.query_row(
+                "SELECT write_locked FROM tasks WHERE id = ?1",
+                params![tid],
+                |r| r.get::<_, i64>(0).map(|v| v != 0)
+            )?;
+
+            if is_locked && agent != "dev" {
+                anyhow::bail!("Tarefa {} bloqueada para escrita (agente: {}).", tid, agent);
+            }
+
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
+                params![st, now, tid],
+            )?;
+            Ok(())
+        }).await?
     }
 
     // ── Queries de leitura ────────────────────────────────────────────────────
 
-    /// Lista todos os eventos do run atual em ordem de sequência.
-    pub fn list_events(&self) -> Result<Vec<EventRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, run_id, sequence, event_type, from_agent, to_agent,
-                    content_summary, enriched_by_human, human_notes, timestamp
-             FROM events WHERE run_id = ?1 ORDER BY sequence ASC",
-        )?;
-        let rows = stmt.query_map(params![self.run_id], |row| {
-            Ok(EventRow {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                sequence: row.get(2)?,
-                event_type: row.get(3)?,
-                from_agent: row.get(4)?,
-                to_agent: row.get(5)?,
-                content_summary: row.get(6)?,
-                enriched_by_human: row.get::<_, i64>(7)? != 0,
-                human_notes: row.get(8)?,
-                timestamp: row.get(9)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    pub async fn list_events(&self) -> Result<Vec<EventRow>> {
+        let pool = self.pool.clone();
+        let rid = self.run_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, sequence, event_type, from_agent, to_agent,
+                        content_summary, enriched_by_human, human_notes, timestamp
+                 FROM events WHERE run_id = ?1 ORDER BY sequence ASC",
+            )?;
+            let rows = stmt.query_map(params![rid], |row| {
+                Ok(EventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    sequence: row.get(2)?,
+                    event_type: row.get(3)?,
+                    from_agent: row.get(4)?,
+                    to_agent: row.get(5)?,
+                    content_summary: row.get(6)?,
+                    enriched_by_human: row.get::<_, i64>(7)? != 0,
+                    human_notes: row.get(8)?,
+                    timestamp: row.get(9)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).await?
     }
 
     /// Lista os últimos N runs do projeto, com seus eventos resumidos.
-    pub fn list_recent_runs(orchestrator_dir: &Path, workspace_path: &Path, limit: usize) -> Result<Vec<RunRow>> {
-        let db_path = orchestrator_dir.join("history.db");
-        if !db_path.exists() {
-            return Ok(vec![]);
-        }
-        let conn = Connection::open(&db_path)?;
-        let workspace_str = workspace_path.to_string_lossy().to_string();
-        let project_id = compute_sha256(&workspace_str);
-        let project_name = workspace_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| workspace_str.clone());
+    pub async fn list_recent_runs(orchestrator_dir: PathBuf, workspace_path: PathBuf, limit: usize) -> Result<Vec<RunRow>> {
+        tokio::task::spawn_blocking(move || {
+            let db_path = orchestrator_dir.join("history.db");
+            if !db_path.exists() {
+                return Ok(vec![]);
+            }
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let workspace_str = workspace_path.to_string_lossy().to_string();
+            let project_id = compute_sha256(&workspace_str);
+            let project_name = workspace_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| workspace_str.clone());
 
-        let mut stmt = conn.prepare(
-            "SELECT id, step_id, status, mode, base_commit,
-                    audit_approved, audit_score, created_at, updated_at
-             FROM runs WHERE project_id = ?1
-             ORDER BY created_at DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![project_id, limit as i64], |row| {
-            Ok(RunRow {
-                id: row.get(0)?,
-                project_name: project_name.clone(),
-                step_id: row.get(1)?,
-                status: row.get(2)?,
-                mode: row.get(3)?,
-                base_commit: row.get(4)?,
-                audit_approved: row.get::<_, Option<i64>>(5)?.map(|v| v != 0),
-                audit_score: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            let mut stmt = conn.prepare(
+                "SELECT id, step_id, status, mode, base_commit,
+                        audit_approved, audit_score, created_at, updated_at
+                 FROM runs WHERE project_id = ?1
+                 ORDER BY created_at DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![project_id, limit as i64], |row| {
+                Ok(RunRow {
+                    id: row.get(0)?,
+                    project_name: project_name.clone(),
+                    step_id: row.get(1)?,
+                    status: row.get(2)?,
+                    mode: row.get(3)?,
+                    base_commit: row.get(4)?,
+                    audit_approved: row.get::<_, Option<i64>>(5)?.map(|v| v != 0),
+                    audit_score: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).await?
     }
 
     /// Lista todos os eventos de um run específico (para auditoria).
-    pub fn list_events_for_run(
-        orchestrator_dir: &Path,
-        run_id: &str,
+    pub async fn list_events_for_run(
+        orchestrator_dir: PathBuf,
+        run_id: String,
     ) -> Result<Vec<EventRow>> {
-        let db_path = orchestrator_dir.join("history.db");
-        let conn = Connection::open(&db_path)?;
-        let mut stmt = conn.prepare(
-            "SELECT id, run_id, sequence, event_type, from_agent, to_agent,
-                    content_summary, enriched_by_human, human_notes, timestamp
-             FROM events WHERE run_id = ?1 ORDER BY sequence ASC",
-        )?;
-        let rows = stmt.query_map(params![run_id], |row| {
-            Ok(EventRow {
-                id: row.get(0)?,
-                run_id: row.get(1)?,
-                sequence: row.get(2)?,
-                event_type: row.get(3)?,
-                from_agent: row.get(4)?,
-                to_agent: row.get(5)?,
-                content_summary: row.get(6)?,
-                enriched_by_human: row.get::<_, i64>(7)? != 0,
-                human_notes: row.get(8)?,
-                timestamp: row.get(9)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        tokio::task::spawn_blocking(move || {
+            let db_path = orchestrator_dir.join("history.db");
+            let conn = rusqlite::Connection::open(&db_path)?;
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, sequence, event_type, from_agent, to_agent,
+                        content_summary, enriched_by_human, human_notes, timestamp
+                 FROM events WHERE run_id = ?1 ORDER BY sequence ASC",
+            )?;
+            let rows = stmt.query_map(params![run_id], |row| {
+                Ok(EventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    sequence: row.get(2)?,
+                    event_type: row.get(3)?,
+                    from_agent: row.get(4)?,
+                    to_agent: row.get(5)?,
+                    content_summary: row.get(6)?,
+                    enriched_by_human: row.get::<_, i64>(7)? != 0,
+                    human_notes: row.get(8)?,
+                    timestamp: row.get(9)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).await?
     }
 
     pub fn run_id(&self) -> &str {
