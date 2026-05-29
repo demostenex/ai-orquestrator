@@ -2,6 +2,7 @@ pub mod apply;
 pub mod audit;
 pub mod init;
 pub mod run;
+pub mod session;
 pub mod status;
 
 use std::fs;

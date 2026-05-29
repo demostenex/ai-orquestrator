@@ -56,6 +56,18 @@ pub enum Commands {
         #[arg(long = "run-id")]
         run_id: Option<String>,
     },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommands {
+    #[command(about = "Lista todas as sessões PTY ativas")]
+    List,
+    #[command(about = "Encerra uma sessão PTY pelo seu PID")]
+    Kill { pid: u32 },
 }
 
 pub async fn run() -> Result<()> {
@@ -67,5 +79,9 @@ pub async fn run() -> Result<()> {
         Commands::Audit { patch, dry_run } => commands::audit::execute(patch, dry_run).await,
         Commands::Apply { patch, dry_run } => commands::apply::execute(patch, dry_run).await,
         Commands::Status { json, short, history, run_id } => commands::status::execute(json, short, history, run_id).await,
+        Commands::Session { command } => match command {
+            SessionCommands::List => crate::commands::session::list().await,
+            SessionCommands::Kill { pid } => crate::commands::session::kill(pid).await,
+        },
     }
 }
