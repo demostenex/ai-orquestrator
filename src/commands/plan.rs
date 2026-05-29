@@ -70,3 +70,36 @@ async fn new_plan(title: Option<String>) -> Result<()> {
 
     Ok(())
 }
+
+/// Função pura que monta o prompt para o próximo turno de planejamento.
+/// Recebe o histórico completo de turnos e o papel da IA atual.
+pub fn build_planning_prompt(turns: &[crate::schemas::PlanTurn], role: &str) -> String {
+    let mut prompt = String::new();
+
+    prompt.push_str(&format!(
+        "Você é a IA **{}** participando de um processo de planejamento colaborativo.\n\n",
+        role
+    ));
+
+    if turns.is_empty() {
+        prompt.push_str("Este é o primeiro turno do planejamento.\n\n");
+    } else {
+        prompt.push_str("Abaixo está o histórico completo dos turnos anteriores:\n\n");
+
+        for turn in turns {
+            prompt.push_str(&format!(
+                "--- Turno {} | Agente: {} | {}\n",
+                turn.sequence, turn.agent, turn.timestamp
+            ));
+            prompt.push_str(&format!("Prompt enviado:\n{}\n\n", turn.prompt.trim()));
+            prompt.push_str(&format!("Resposta recebida:\n{}\n\n", turn.content.trim()));
+        }
+    }
+
+    prompt.push_str("Sua tarefa agora:\n");
+    prompt.push_str("- Analise cuidadosamente o histórico acima.\n");
+    prompt.push_str("- Contribua de forma estruturada e útil de acordo com seu papel.\n");
+    prompt.push_str("- Mantenha o foco no planejamento de alto nível (arquitetura, tarefas, decisões).\n\n");
+
+    prompt
+}

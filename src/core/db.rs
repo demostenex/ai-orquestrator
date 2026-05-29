@@ -506,6 +506,27 @@ impl Db {
         }).await?
     }
 
+    pub async fn get_plan_turns(&self, plan_id: &str) -> Result<Vec<crate::schemas::PlanTurn>> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT sequence, agent, prompt, content, timestamp FROM plan_turns WHERE plan_id = ?1 ORDER BY sequence ASC"
+            )?;
+            let rows = stmt.query_map(params![plid], |row| {
+                Ok(crate::schemas::PlanTurn {
+                    sequence: row.get(0)?,
+                    agent: row.get(1)?,
+                    prompt: row.get(2)?,
+                    content: row.get(3)?,
+                    timestamp: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).await?
+    }
+
     // CA-MD2: Registrar versão com hash
     pub async fn add_plan_version(&self, plan_id: &str, content_hash: &str, notes: Option<&str>) -> Result<()> {
         let pool = self.pool.clone();

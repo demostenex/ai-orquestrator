@@ -28,6 +28,15 @@ pub struct Plan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanTurn {
+    pub sequence: i64,
+    pub agent: String,    // "architect" | "dev" | "human"
+    pub prompt: String,
+    pub content: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevResponse {
     pub step_id: String,
     pub summary: String,
