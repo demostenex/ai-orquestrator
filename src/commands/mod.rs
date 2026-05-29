@@ -218,6 +218,55 @@ pub(crate) async fn interactive_gate(
     }
 }
 
+/// Portão interativo específico para o contexto de um Plano.
+/// Implementa o fluxo de "Enriquecer Plano" (Passo 2.4), capturando notas
+/// semânticas do usuário que serão enviadas à IA para que ELA atualize o SSOT.
+pub async fn interactive_plan_gate(
+    _orchestrator_dir: &Path,
+    db: &crate::core::db::Db,
+    plan_id: &str,
+    plan_content: &str,
+) -> Result<String> {
+    let sep = "══════════════════════════════════════════════════════════".bold();
+    println!("\n{sep}");
+    println!("{}", " 📋 PORTÃO — Revisão do Plano".bold().cyan());
+    println!("{sep}");
+    print_content_preview(plan_content, 60);
+    println!("{sep}");
+
+    let options = vec![
+        "Seguir (Aprovar) ✅",
+        "Enriquecer (Adicionar instruções/notas) ✏️",
+        "Abortar (Cancelar) ❌",
+    ];
+
+    let selection = tokio::task::spawn_blocking(move || {
+        inquire::Select::new("Selecione uma ação:", options)
+            .prompt()
+    }).await??;
+
+    match selection {
+        "Seguir (Aprovar) ✅" => Ok(plan_content.to_string()),
+        "Enriquecer (Adicionar instruções/notas) ✏️" => {
+            let notes = tokio::task::spawn_blocking(move || {
+                inquire::Editor::new("Digite as instruções para a IA atualizar o plano:")
+                    .with_help_message("O arquivo será aberto no seu editor padrão ($EDITOR). Feche o editor para salvar.")
+                    .prompt()
+            }).await??;
+
+            if notes.trim().is_empty() {
+                println!(" {} Nenhuma instrução adicionada. Prosseguindo...\n", "⚠".yellow());
+                Ok(plan_content.to_string())
+            } else {
+                db.add_plan_turn(plan_id, "human", "Enriquecimento manual via portão do plano", &notes).await?;
+                println!(" {} Instruções adicionadas ao contexto da próxima IA.", "✔".green());
+                Ok(format!("{plan_content}\n\n[NOTAS DO HUMANO]\n{notes}"))
+            }
+        }
+        _ => anyhow::bail!("Operação abortada no portão do plano."),
+    }
+}
+
 /// Aguarda um arquivo aparecer no sistema de arquivos (modo manual).
 /// Faz polling a cada 2 segundos com timeout de `max_wait_secs`.
 pub(crate) async fn wait_for_file(path: &Path, max_wait_secs: u64) -> Result<()> {
