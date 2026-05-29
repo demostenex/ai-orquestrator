@@ -122,28 +122,6 @@ pub async fn verify_plan_integrity(orchestrator_dir: &Path, db: &Db, plan_id: &s
     }
 }
 
-/// Lê uma linha do stdin de forma bloqueante (seguro para usar em contexto async via spawn_blocking).
-fn read_line_blocking() -> Result<String> {
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(line.trim_end_matches('\n').trim_end_matches('\r').to_string())
-}
-
-/// Lê linhas do stdin até linha vazia. Retorna o texto concatenado.
-fn read_multiline_blocking() -> Result<String> {
-    let mut lines = Vec::new();
-    loop {
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r').to_string();
-        if trimmed.is_empty() {
-            break;
-        }
-        lines.push(trimmed);
-    }
-    Ok(lines.join("\n"))
-}
-
 /// Exibe o conteúdo com limite de linhas e oferece continuar ou truncar.
 fn print_content_preview(content: &str, max_lines: usize) {
     let lines: Vec<&str> = content.lines().collect();
@@ -167,67 +145,51 @@ pub(crate) async fn interactive_gate(
     content: &str,
     direction: &str, // ex: "Dev → Auditora", "Orquestrador → Dev"
 ) -> Result<String> {
-    let sep = "══════════════════════════════════════".bold();
+    let sep = "══════════════════════════════════════════════════════════".bold();
     println!("\n{sep}");
-    println!("{}", format!("📋  PORTÃO — {label}").bold().cyan());
-    println!("{}", format!("    {direction}").dimmed());
+    println!("{}", format!(" 📋 PORTÃO — {label}").bold().cyan());
+    println!("{}", format!(" 🚀 Fluxo: {direction}").dimmed());
     println!("{sep}");
     print_content_preview(content, 60);
     println!("{sep}");
 
-    // Pergunta se quer adicionar informações
-    let additions = tokio::task::spawn_blocking(|| -> Result<Option<String>> {
-        print!(
-            "\n{} Deseja adicionar informações antes de passar? [s/{}]: ",
-            "❓".yellow(),
-            "N".bold()
-        );
-        // flush
-        use std::io::Write;
-        std::io::stdout().flush().ok();
+    let options = vec![
+        "Seguir (Aprovar) ✅",
+        "Enriquecer (Adicionar notas) ✏️",
+        "Abortar (Cancelar) ❌",
+    ];
 
-        let answer = read_line_blocking()?;
-        if answer.trim().to_lowercase() == "s" {
-            println!(
-                "{} Digite (uma linha vazia finaliza):",
-                "✏".green()
-            );
-            let text = read_multiline_blocking()?;
-            if text.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(text))
-            }
-        } else {
-            Ok(None)
+    let selection = tokio::task::spawn_blocking(move || {
+        inquire::Select::new("Selecione uma ação:", options)
+            .with_help_message("Use as setas para navegar e Enter para confirmar")
+            .prompt()
+    }).await??;
+
+    match selection {
+        "Seguir (Aprovar) ✅" => {
+            println!(" {} Prosseguindo...\n", "✔".green());
+            Ok(content.to_string())
         }
-    })
-    .await??;
+        "Enriquecer (Adicionar notas) ✏️" => {
+            let notes = tokio::task::spawn_blocking(|| {
+                inquire::Text::new("Digite suas notas (ou deixe vazio para cancelar):")
+                    .with_help_message("Estas notas serão injetadas no contexto da próxima IA")
+                    .prompt()
+            }).await??;
 
-    let enriched = if let Some(extra) = additions {
-        println!("{} Informações adicionadas ao contexto.", "✔".green());
-        format!("{content}\n\n[NOTAS DO HUMANO]\n{extra}")
-    } else {
-        content.to_string()
-    };
-
-    // Confirmação final para passar
-    tokio::task::spawn_blocking(|| -> Result<()> {
-        print!(
-            "\n{} Pressione {} para passar adiante (ou {} para abortar): ",
-            "▶".green(),
-            "Enter".bold().green(),
-            "Ctrl+C".red()
-        );
-        use std::io::Write;
-        std::io::stdout().flush().ok();
-        read_line_blocking()?;
-        Ok(())
-    })
-    .await??;
-
-    println!("{} Passou! Seguindo...\n", "✔".green());
-    Ok(enriched)
+            if notes.trim().is_empty() {
+                println!(" {} Nenhuma nota adicionada. Prosseguindo...\n", "⚠".yellow());
+                Ok(content.to_string())
+            } else {
+                println!(" {} Notas adicionadas ao contexto.", "✔".green());
+                Ok(format!("{content}\n\n[NOTAS DO HUMANO]\n{notes}"))
+            }
+        }
+        _ => {
+            println!(" {} Operação abortada pelo usuário.", "✘".red());
+            anyhow::bail!("Handoff cancelado")
+        }
+    }
 }
 
 /// Aguarda um arquivo aparecer no sistema de arquivos (modo manual).
