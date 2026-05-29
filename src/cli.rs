@@ -60,6 +60,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: SessionCommands,
     },
+    Plan(PlanArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -69,6 +70,9 @@ pub enum SessionCommands {
     #[command(about = "Encerra uma sessão PTY pelo seu PID")]
     Kill { pid: u32 },
 }
+
+#[derive(Debug, clap::Args)]
+pub struct PlanArgs {}
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -83,5 +87,6 @@ pub async fn run() -> Result<()> {
             SessionCommands::List => crate::commands::session::list().await,
             SessionCommands::Kill { pid } => crate::commands::session::kill(pid).await,
         },
+        Commands::Plan(args) => commands::plan::execute(args).await,
     }
 }

@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod audit;
 pub mod init;
+pub mod plan;
 pub mod run;
 pub mod session;
 pub mod status;
