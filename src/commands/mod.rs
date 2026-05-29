@@ -126,8 +126,34 @@ pub async fn verify_plan_integrity(orchestrator_dir: &Path, db: &Db, plan_id: &s
 fn print_content_preview(content: &str, max_lines: usize) {
     let lines: Vec<&str> = content.lines().collect();
     let shown = lines.len().min(max_lines);
+    
+    // B1: Detecção estrita de Unified Diff para evitar falsos positivos com Markdown
+    let is_diff = (content.contains("\n--- ") || content.starts_with("--- "))
+        && (content.contains("\n+++ ") || content.starts_with("+++ "))
+        && content.contains("\n@@");
+        
+    let mut in_diff_block = is_diff && (content.starts_with("--- ") || content.starts_with("+++ ") || content.starts_with("@@"));
+
     for line in &lines[..shown] {
-        println!("{}", line.dimmed());
+        if is_diff && (line.starts_with("--- ") || line.starts_with("+++ ") || *line == "--- DIFF ---") {
+            in_diff_block = true;
+        }
+
+        if in_diff_block {
+            if line.starts_with('+') && !line.starts_with("+++") {
+                println!("{}", line.green());
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                println!("{}", line.red());
+            } else if line.starts_with("@@") {
+                println!("{}", line.cyan());
+            } else if line.starts_with("+++") || line.starts_with("---") {
+                println!("{}", line.bold());
+            } else {
+                println!("{}", line.dimmed());
+            }
+        } else {
+            println!("{}", line.dimmed());
+        }
     }
     if lines.len() > max_lines {
         println!(
