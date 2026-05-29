@@ -6,6 +6,7 @@ pub mod handoff;
 pub mod memory;
 pub mod patch;
 pub mod security;
+pub mod session;
 
 use sha2::{Digest, Sha256};
 
