@@ -13,6 +13,7 @@ use chrono::Utc;
 use colored::Colorize;
 use serde::Serialize;
 
+use crate::core::db::Db;
 use crate::schemas::CycleState;
 
 pub(crate) fn read_to_string(path: &Path) -> Result<String> {
@@ -64,6 +65,61 @@ pub(crate) fn print_warning(message: &str) {
 
 pub(crate) fn now_string() -> String {
     Utc::now().to_rfc3339()
+}
+
+// CA-MD1, CA-MD2, CA-MD4: Exportador Markdown
+pub async fn export_plan_to_markdown(orchestrator_dir: &Path, db: &Db, plan_id: &str) -> Result<()> {
+    let title = db.get_plan_title(plan_id).await?;
+    let tasks = db.get_plan_tasks(plan_id).await?;
+
+    let mut content = String::new();
+    // CA-MD4: Cabeçalho obrigatório
+    content.push_str("<!-- ⚠️ ESTE ARQUIVO É GERADO AUTOMATICAMENTE PELO AI-ORQUESTRATOR. NÃO EDITE DIRETAMENTE. -->\n\n");
+    content.push_str(&format!("# {}\n\n", title));
+    content.push_str("## Todo List\n\n");
+
+    if tasks.is_empty() {
+        content.push_str("  (nenhuma tarefa definida)\n");
+    } else {
+        for task in tasks {
+            let mark = match task.status.as_str() {
+                "completed" => "[x]",
+                "pending" => "[ ]",
+                "blocked" => "[!]",
+                _ => "[ ]",
+            };
+            let assigned = task.assigned_to.as_ref().map(|a| format!(" (@{})", a)).unwrap_or_default();
+            content.push_str(&format!("- {} {}{}\n", mark, task.description, assigned));
+        }
+    }
+
+    content.push_str("\n---\n*Nota: Este arquivo é uma exportação do SQLite. O banco de dados é a fonte da verdade.*\n");
+
+    // Gerar e salvar hash antes de escrever o arquivo (CA-MD2)
+    let hash = crate::core::compute_sha256(&content);
+    db.add_plan_version(plan_id, &hash, Some("Auto-export")).await?;
+
+    let path = orchestrator_dir.join("plan.md");
+    write_string(&path, &content)?;
+    Ok(())
+}
+
+// CA-MD3: Detector de Conflito
+pub async fn verify_plan_integrity(orchestrator_dir: &Path, db: &Db, plan_id: &str) -> Result<bool> {
+    let path = orchestrator_dir.join("plan.md");
+    if !path.exists() {
+        return Ok(true); // Se não existe, não há conflito de edição
+    }
+
+    let file_content = read_to_string(&path)?;
+    let file_hash = crate::core::compute_sha256(&file_content);
+
+    let db_hash = db.get_latest_plan_hash(plan_id).await?;
+
+    match db_hash {
+        Some(expected) => Ok(file_hash == expected),
+        None => Ok(false), // Temos arquivo mas nenhuma versão registrada no DB = Conflito
+    }
 }
 
 /// Lê uma linha do stdin de forma bloqueante (seguro para usar em contexto async via spawn_blocking).
@@ -209,21 +265,21 @@ pub(crate) fn print_manual_instructions(
     println!("{}", format!("MODO MANUAL — {agent_label}").bold().yellow());
     println!("{separator}");
     println!(
-        "Prompt salvo em:\n  {}\n",
+        "Prompt saved in:\n  {}\n",
         prompt_file.display().to_string().cyan()
     );
-    println!("Execute em outro terminal:");
+    println!("Execute in another terminal:");
     println!(
         "  {} {}\n",
         "cat".dimmed(),
         prompt_file.display().to_string().cyan()
     );
-    println!("  (ou pipe direto para o seu CLI: gemini, claude, copilot)\n");
-    println!("Salve a resposta JSON em:");
+    println!("  (or direct pipe to your CLI: gemini, claude, copilot)\n");
+    println!("Save JSON response in:");
     println!("  {}\n", response_file.display().to_string().green());
     println!(
         "{}",
-        "O orquestrador está aguardando o arquivo ser criado...".dimmed()
+        "The orchestrator is waiting for file creation...".dimmed()
     );
     println!("{separator}\n");
 }

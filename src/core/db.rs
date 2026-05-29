@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 
@@ -379,7 +379,7 @@ impl Db {
         }).await?
     }
 
-    // ── Novos Métodos CRUD (Passo 1.3) ─────────────────────────────────────────
+    // ── Novos Métodos CRUD (Passo 1.3/1.4) ─────────────────────────────────────
 
     pub async fn create_plan(&self, plan_id: &str, title: &str) -> Result<()> {
         let pool = self.pool.clone();
@@ -469,6 +469,72 @@ impl Db {
                 params![st, now, tid],
             )?;
             Ok(())
+        }).await?
+    }
+
+    // CA-MD1: Métodos de leitura para exportação
+    pub async fn get_plan_title(&self, plan_id: &str) -> Result<String> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            conn.query_row(
+                "SELECT title FROM plans WHERE id = ?1",
+                params![plid],
+                |r| r.get(0)
+            ).map_err(Into::into)
+        }).await?
+    }
+
+    pub async fn get_plan_tasks(&self, plan_id: &str) -> Result<Vec<crate::schemas::Task>> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT id, description, status, assigned_to FROM tasks WHERE plan_id = ?1 ORDER BY sequence ASC"
+            )?;
+            let rows = stmt.query_map(params![plid], |row| {
+                Ok(crate::schemas::Task {
+                    id: row.get(0)?,
+                    description: row.get(1)?,
+                    status: row.get(2)?,
+                    assigned_to: row.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).await?
+    }
+
+    // CA-MD2: Registrar versão com hash
+    pub async fn add_plan_version(&self, plan_id: &str, content_hash: &str, notes: Option<&str>) -> Result<()> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+        let hash = content_hash.to_string();
+        let nts = notes.map(|s| s.to_string());
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO plan_versions (plan_id, content_hash, human_notes, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![plid, hash, nts, now],
+            )?;
+            Ok(())
+        }).await?
+    }
+
+    // CA-MD3: Buscar último hash para detecção de conflito
+    pub async fn get_latest_plan_hash(&self, plan_id: &str) -> Result<Option<String>> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT content_hash FROM plan_versions WHERE plan_id = ?1 ORDER BY created_at DESC LIMIT 1"
+            )?;
+            let res = stmt.query_row(params![plid], |r| r.get(0)).optional()?;
+            Ok(res)
         }).await?
     }
 

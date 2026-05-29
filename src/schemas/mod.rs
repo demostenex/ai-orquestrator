@@ -11,6 +11,23 @@ pub enum ValidationError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub description: String,
+    pub status: String,
+    pub assigned_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plan {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub title: String,
+    pub status: String,
+    pub tasks: Vec<Task>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevResponse {
     pub step_id: String,
     pub summary: String,
