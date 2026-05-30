@@ -258,7 +258,17 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                             app.log_rx = None;
                             app.gate_tx = None;
-                            app.view = AppView::Home;
+                            // Fix 2: não vai para Home se há erros — usuário precisa ler
+                            let has_errors = app.exec.lines.iter()
+                                .any(|l| l.starts_with("ERRO:") || l.contains("❌") || l.contains("ERRO"));
+                            if has_errors {
+                                app.exec.lines.push(
+                                    "(thread finalizada — leia os erros acima e pressione q)".to_string()
+                                );
+                                // permanece em Executing
+                            } else {
+                                app.view = AppView::Home;
+                            }
                             break;
                         }
                     }
@@ -278,12 +288,14 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                 let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<GateDecision>(1);
                 let dir = app.orchestrator_dir.clone();
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    let result = rt.block_on(run_planning_background(
-                        dir, plan_id, cli1, cli2, max_turns, log_tx.clone(), gate_rx,
-                    ));
-                    if let Err(e) = result {
-                        let _ = log_tx.send(LogEvent::Failed(e.to_string()));
+                    match tokio::runtime::Runtime::new() {
+                        Err(e) => { let _ = log_tx.send(LogEvent::Failed(format!("runtime: {}", e))); }
+                        Ok(rt) => {
+                            let result = rt.block_on(run_planning_background(
+                                dir, plan_id, cli1, cli2, max_turns, log_tx.clone(), gate_rx,
+                            ));
+                            if let Err(e) = result { let _ = log_tx.send(LogEvent::Failed(e.to_string())); }
+                        }
                     }
                 });
                 app.exec = ExecState::new("Planejamento em andamento...".to_string());
@@ -296,12 +308,14 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                 let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(256);
                 let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<GateDecision>(1);
                 std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    let result = rt.block_on(crate::commands::run::execute_tui(
-                        plan_id, cli_dev, cli_audit, log_tx.clone(), gate_rx,
-                    ));
-                    if let Err(e) = result {
-                        let _ = log_tx.send(LogEvent::Failed(e.to_string()));
+                    match tokio::runtime::Runtime::new() {
+                        Err(e) => { let _ = log_tx.send(LogEvent::Failed(format!("runtime: {}", e))); }
+                        Ok(rt) => {
+                            let result = rt.block_on(crate::commands::run::execute_tui(
+                                plan_id, cli_dev, cli_audit, log_tx.clone(), gate_rx,
+                            ));
+                            if let Err(e) = result { let _ = log_tx.send(LogEvent::Failed(e.to_string())); }
+                        }
                     }
                 });
                 app.exec = ExecState::new("Modo Dev em andamento...".to_string());
@@ -311,20 +325,47 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
             }
             LoopCmd::StartScan => {
                 use crate::core::stream::*;
-                let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(512);
-                let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<GateDecision>(1);
-                let dir = app.orchestrator_dir.clone();
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    let result = rt.block_on(run_deep_scan(dir, log_tx.clone(), gate_rx));
-                    if let Err(e) = result {
-                        let _ = log_tx.send(LogEvent::Failed(e.to_string()));
-                    }
-                });
-                app.exec = ExecState::new("🔍 Deep Scan — Sincronizando ai-memory".to_string());
-                app.log_rx = Some(log_rx);
-                app.gate_tx = Some(gate_tx);
-                app.view = AppView::Executing;
+
+                // Fix 3: valida se o binário ai-memory existe no PATH antes de spawnar
+                let cli_ok = std::process::Command::new("ai-memory")
+                    .arg("status")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok();
+
+                if !cli_ok {
+                    let mut exec = ExecState::new("🔍 Deep Scan — Erro de Configuração".to_string());
+                    exec.lines.push("ERRO: 'ai-memory' não encontrado no PATH.".to_string());
+                    exec.lines.push("Instale o ai-memory CLI e tente novamente.".to_string());
+                    exec.lines.push("(pressione q para voltar ao menu)".to_string());
+                    app.exec = exec;
+                    app.view = AppView::Executing;
+                } else {
+                    let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(512);
+                    let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<GateDecision>(1);
+                    let dir = app.orchestrator_dir.clone();
+                    // Fix 1: Runtime::new() sem unwrap — erro propagado pelo canal
+                    std::thread::spawn(move || {
+                        match tokio::runtime::Runtime::new() {
+                            Err(e) => {
+                                let _ = log_tx.send(LogEvent::Failed(
+                                    format!("Falha ao criar runtime tokio: {}", e)
+                                ));
+                            }
+                            Ok(rt) => {
+                                let result = rt.block_on(run_deep_scan(dir, log_tx.clone(), gate_rx));
+                                if let Err(e) = result {
+                                    let _ = log_tx.send(LogEvent::Failed(e.to_string()));
+                                }
+                            }
+                        }
+                    });
+                    app.exec = ExecState::new("🔍 Deep Scan — Sincronizando ai-memory".to_string());
+                    app.log_rx = Some(log_rx);
+                    app.gate_tx = Some(gate_tx);
+                    app.view = AppView::Executing;
+                }
             }
             LoopCmd::CreatePlan { title } => {
                 create_plan_native(&app.orchestrator_dir, title).await?;
