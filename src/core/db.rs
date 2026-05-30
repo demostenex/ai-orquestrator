@@ -443,6 +443,22 @@ impl Db {
         }).await?
     }
 
+    /// Ativa o bloqueio de escrita em todas as tarefas de um plano.
+    /// Deve ser chamado **somente** após confirmação explícita do usuário.
+    pub async fn lock_plan_tasks(&self, plan_id: &str) -> Result<()> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            conn.execute(
+                "UPDATE tasks SET write_locked = 1 WHERE plan_id = ?1",
+                params![plid],
+            )?;
+            Ok(())
+        }).await?
+    }
+
     pub async fn update_task_status(&self, agent_name: &str, task_id: &str, status: &str) -> Result<()> {
         let pool = self.pool.clone();
         let agent = agent_name.to_string();

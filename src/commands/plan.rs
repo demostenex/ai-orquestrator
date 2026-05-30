@@ -5,7 +5,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::cli::PlanCommands;
-use crate::commands::{export_plan_to_markdown, interactive_plan_gate, print_success};
+use crate::commands::{export_plan_to_markdown, interactive_gate, interactive_plan_gate, print_success};
 use crate::core::cli_runner::run_cli;
 use crate::core::config::Config;
 use crate::core::db::Db;
@@ -15,6 +15,7 @@ use crate::schemas::PlanTurn;
 pub async fn execute(command: PlanCommands) -> Result<()> {
     match command {
         PlanCommands::New { title } => new_plan(title).await,
+        PlanCommands::Finalize { plan_id } => finalize_plan(plan_id).await,
     }
 }
 
@@ -201,5 +202,65 @@ pub async fn run_planning_loop(
         "Limite de {} turnos atingido. Planejamento encerrado.",
         max_turns
     );
+    Ok(())
+}
+
+/// Finaliza o planejamento:
+/// - Pede confirmação explícita do usuário via gate
+/// - Ativa write_locked em todas as tarefas do plano
+/// - Exporta o todo list final em Markdown
+pub async fn finalize_plan(plan_id: String) -> Result<()> {
+    let config = Config::load()?;
+
+    // Busca informações básicas do plano
+    let db = Db::open(
+        &config.orchestrator_dir,
+        &config.workspace_dir,
+        &Uuid::new_v4().to_string(), // run_id temporário só para leitura
+        &config.step_id,
+        "planning",
+        "HEAD",
+        "",
+        "",
+    )?;
+
+    let title = db.get_plan_title(&plan_id).await?;
+    let tasks = db.get_plan_tasks(&plan_id).await?;
+
+    let summary = format!(
+        "Plano: {}\nID: {}\n\nTotal de tarefas: {}\n\nDeseja realmente **finalizar** este planejamento?\n\nIsso irá bloquear permanentemente a edição do todo list (write_locked).",
+        title,
+        plan_id,
+        tasks.len()
+    );
+
+    // Gate de confirmação humana (obrigatório)
+    let confirmation = interactive_gate(
+        "Finalizar Planejamento",
+        &summary,
+        "Humano → Sistema",
+    )
+    .await?;
+
+    // Se o usuário abortou, o interactive_gate já retorna erro
+    // Se chegou aqui, foi confirmado
+
+    println!("\n{} Confirmado. Finalizando planejamento...\n", "✔".green());
+
+    // Ativa o lock (só aqui, após confirmação explícita)
+    db.lock_plan_tasks(&plan_id).await?;
+
+    // Exporta o todo list final
+    export_plan_to_markdown(&config.orchestrator_dir, &db, &plan_id).await?;
+
+    print_success("Planejamento finalizado com sucesso!");
+    println!("  ID do plano     : {}", plan_id.cyan());
+    println!("  Título          : {}", title);
+    println!("  Tarefas         : {}", tasks.len());
+    println!("  write_locked    : {}", "ativado em todas as tarefas".green());
+    println!("  Arquivo gerado  : {}", config.orchestrator_dir.join("plan.md").display().to_string().cyan());
+    println!();
+    println!("O todo list agora está bloqueado para edição por agentes que não sejam 'dev'.");
+
     Ok(())
 }

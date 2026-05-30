@@ -81,6 +81,11 @@ pub enum PlanCommands {
         #[arg(short, long, help = "Título descritivo do plano")]
         title: Option<String>,
     },
+    #[command(about = "Finaliza o planejamento, bloqueia o todo list e exporta versão final")]
+    Finalize {
+        #[arg(short, long, help = "ID do plano a ser finalizado")]
+        plan_id: String,
+    },
 }
 
 pub async fn run() -> Result<()> {
