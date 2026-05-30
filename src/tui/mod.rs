@@ -4,6 +4,7 @@ use tokio::task;
 
 pub mod dashboard;
 pub mod home;
+pub mod plan_selector;
 
 use crate::cli::PlanCommands;
 use crate::core::db::Db;
@@ -24,17 +25,17 @@ pub async fn start() -> Result<()> {
 
         match action {
             HomeAction::NewPlan => handle_new_plan().await?,
-            HomeAction::ContinuePlanning => handle_continue_planning().await?,
+            HomeAction::ContinuePlanning => {
+                let db = Db::open_readonly(&orchestrator_dir).await?;
+                let plans = db.list_plans().await?;
+                let plan_id = plan_selector::run(plans, "Selecionar plano para continuar o planejamento")?;
+                handle_continue_planning(plan_id).await?;
+            }
             HomeAction::ExecuteDev => handle_execute_dev_mode().await?,
             HomeAction::OpenDashboard => {
-                let pid = task::spawn_blocking(|| {
-                    Text::new("ID do plano para o dashboard (vazio para cancelar):")
-                        .prompt()
-                        .ok()
-                        .filter(|s| !s.trim().is_empty())
-                })
-                .await?;
-                if let Some(pid) = pid {
+                let db = Db::open_readonly(&orchestrator_dir).await?;
+                let plans = db.list_plans().await?;
+                if let Some(pid) = plan_selector::run(plans, "Selecionar plano para abrir no Dashboard")? {
                     dashboard::run_dashboard(orchestrator_dir.clone(), pid)?;
                 }
             }
@@ -54,14 +55,10 @@ async fn handle_new_plan() -> Result<()> {
     crate::commands::plan::execute(PlanCommands::New { title: None }).await
 }
 
-async fn handle_continue_planning() -> Result<()> {
-    let plan_id = task::spawn_blocking(|| {
-        Text::new("ID do plano (vazio para selecionar interativamente):")
-            .prompt()
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    })
-    .await?;
+async fn handle_continue_planning(plan_id: Option<String>) -> Result<()> {
+    if plan_id.is_none() {
+        return Ok(()); // cancelado no seletor
+    }
 
     let cli1 = task::spawn_blocking(|| {
         Text::new("CLI para o Arquiteto (ex: claude, gemini):").prompt()
