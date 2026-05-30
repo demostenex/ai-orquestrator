@@ -127,21 +127,17 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                 suspend_for_input(terminal, app, action).await?;
             }
             LoopCmd::LoadDashboard(plan_id) => {
-                let rt = tokio::runtime::Runtime::new()?;
-                let data = rt.block_on(DashboardState::load(
-                    app.orchestrator_dir.clone(),
-                    plan_id,
-                ))?;
+                let data = DashboardState::load(app.orchestrator_dir.clone(), plan_id).await?;
                 app.dash_ui = DashboardUiState::new(data.recent_events.len());
                 app.dash_data = data;
                 app.view = AppView::Dashboard;
             }
             LoopCmd::ReloadDashboard => {
-                let rt = tokio::runtime::Runtime::new()?;
-                let data = rt.block_on(DashboardState::load(
+                let data = DashboardState::load(
                     app.orchestrator_dir.clone(),
                     app.dash_data.plan_id.clone(),
-                ))?;
+                )
+                .await?;
                 app.dash_ui.reset(data.recent_events.len());
                 app.dash_data = data;
             }
@@ -363,15 +359,10 @@ async fn suspend_for_input(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async fn load_plans(orchestrator_dir: &PathBuf) -> Vec<PlanSummary> {
-    Db::open_readonly(orchestrator_dir)
-        .await
-        .ok()
-        .map(|db| async move { db.list_plans().await.unwrap_or_default() })
-        .map(|f| {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(f)
-        })
-        .unwrap_or_default()
+    let Ok(db) = Db::open_readonly(orchestrator_dir).await else {
+        return vec![];
+    };
+    db.list_plans().await.unwrap_or_default()
 }
 
 async fn handle_continue_planning(plan_id: String) -> Result<()> {
