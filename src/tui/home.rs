@@ -7,14 +7,15 @@ use crate::core::db::ProjectSummary;
 
 // ── Menu ──────────────────────────────────────────────────────────────────────
 
-pub const MENU_LEN: usize = 5;
+pub const MENU_LEN: usize = 6;
 
 const MENU_ITEMS: &[(&str, &str)] = &[
     ("1. Novo Plano", "Cria um novo plano com o Arquiteto"),
     ("2. Continuar Planejamento", "Retoma uma sessão de planejamento em andamento"),
     ("3. Executar Modo Dev", "Executa as tarefas de um plano aprovado"),
     ("4. Abrir Dashboard", "Visualiza progresso e auditoria em tempo real"),
-    ("5. Sair", "Encerra o AI Orchestrator"),
+    ("5. Sincronizar Histórico", "Ingere páginas do ai-memory no banco de auditoria"),
+    ("6. Sair", "Encerra o AI Orchestrator"),
 ];
 
 // ── State ─────────────────────────────────────────────────────────────────────

@@ -309,6 +309,23 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                 app.gate_tx = Some(gate_tx);
                 app.view = AppView::Executing;
             }
+            LoopCmd::StartScan => {
+                use crate::core::stream::*;
+                let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(512);
+                let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<GateDecision>(1);
+                let dir = app.orchestrator_dir.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(run_deep_scan(dir, log_tx.clone(), gate_rx));
+                    if let Err(e) = result {
+                        let _ = log_tx.send(LogEvent::Failed(e.to_string()));
+                    }
+                });
+                app.exec = ExecState::new("🔍 Deep Scan — Sincronizando ai-memory".to_string());
+                app.log_rx = Some(log_rx);
+                app.gate_tx = Some(gate_tx);
+                app.view = AppView::Executing;
+            }
             LoopCmd::CreatePlan { title } => {
                 create_plan_native(&app.orchestrator_dir, title).await?;
                 app.summary = Db::get_home_summary(app.orchestrator_dir.clone()).await.unwrap_or_default();
@@ -353,6 +370,7 @@ enum LoopCmd {
     GoTo(AppView),
     StartPlanning { plan_id: String, cli1: String, cli2: Option<String>, max_turns: usize },
     StartDev { plan_id: String, cli_dev: String, cli_audit: Option<String> },
+    StartScan,
     CreatePlan { title: String },
     GateDecide(crate::core::stream::GateDecision),
     LoadDashboard(String),
@@ -380,9 +398,9 @@ fn dispatch_home(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
         }
         KeyCode::Up => { app.home.move_up(); LoopCmd::Continue }
         KeyCode::Down => { app.home.move_down(); LoopCmd::Continue }
-        KeyCode::Enter | KeyCode::Char('1'..='5') => {
+        KeyCode::Enter | KeyCode::Char('1'..='6') => {
             let idx = match key {
-                KeyCode::Char(c @ '1'..='5') => (c as usize) - ('1' as usize),
+                KeyCode::Char(c @ '1'..='6') => (c as usize) - ('1' as usize),
                 _ => app.home.selected(),
             };
             match idx {
@@ -402,6 +420,7 @@ fn dispatch_home(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
                     app.selector_ctx = SelectorCtx::ForDashboard;
                     LoopCmd::GoTo(AppView::Selector(SelectorCtx::ForDashboard))
                 }
+                4 => LoopCmd::StartScan,
                 _ => LoopCmd::Quit,
             }
         }
@@ -685,7 +704,7 @@ fn render_gate(f: &mut Frame, exec: &ExecState, area: Rect) {
 fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
     let text = match view {
         AppView::Home =>
-            "  ↑↓: Navegar   Enter: Executar   1-5: Atalho   r: Recarregar Memória   q: Sair",
+            "  ↑↓: Navegar   Enter: Executar   1-6: Atalho   r: Recarregar Memória   q: Sair",
         AppView::Selector(_) =>
             "  ↑↓: Navegar   Enter: Selecionar   q/Esc: Voltar ao Menu",
         AppView::Dashboard =>
@@ -757,6 +776,122 @@ async fn create_plan_native(orchestrator_dir: &PathBuf, title: String) -> Result
     )?;
     db.create_plan(&plan_id, &title).await?;
     crate::commands::export_plan_to_markdown(orchestrator_dir, &db, &plan_id).await?;
+    Ok(())
+}
+
+// ── Deep Scan (Fase 5.6.2) ────────────────────────────────────────────────────
+
+struct MemoryPageInfo {
+    path: String,
+    title: String,
+}
+
+/// Lista todas as páginas do ai-memory via CLI.
+fn list_ai_memory_pages() -> Vec<MemoryPageInfo> {
+    for args in [
+        vec!["list"],
+        vec!["pages"],
+        vec!["recent", "--limit", "200"],
+    ] {
+        let Ok(output) = std::process::Command::new("ai-memory").args(&args).output() else { continue };
+        if !output.status.success() { continue }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+        let arr = val.as_array()
+            .or_else(|| val.get("hits").and_then(|h| h.as_array()))
+            .or_else(|| val.get("pages").and_then(|p| p.as_array()));
+        if let Some(arr) = arr {
+            let pages: Vec<MemoryPageInfo> = arr.iter().filter_map(|item| {
+                let path = item.get("path")?.as_str()?.to_string();
+                let title = item.get("title").and_then(|t| t.as_str())
+                    .unwrap_or(&path).to_string();
+                Some(MemoryPageInfo { path, title })
+            }).collect();
+            if !pages.is_empty() { return pages; }
+        }
+    }
+    vec![]
+}
+
+/// Extrai event_type e run_id a partir do path da página wiki.
+fn extract_metadata_from_path(path: &str) -> (&'static str, String) {
+    let run_id_from_path = |s: &str| -> String {
+        // handoffs/run_<id>/... → extrai <id>
+        s.strip_prefix("run_")
+            .map(|r| r.split('/').next().unwrap_or(r).strip_suffix(".md").unwrap_or(r).to_string())
+            .unwrap_or_else(|| format!("scan-{:016x}",
+                path.bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64))))
+    };
+
+    if path.starts_with("handoffs/") {
+        let seg = path.strip_prefix("handoffs/").unwrap_or(path);
+        ("handoff_created", run_id_from_path(seg))
+    } else if path.starts_with("decisions/") {
+        ("gate_passed", format!("scan-decisions-{:016x}",
+            path.bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64))))
+    } else if path.starts_with("plans/") || path.starts_with("notes/") {
+        ("gate_enriched", format!("scan-notes-{:016x}",
+            path.bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64))))
+    } else {
+        ("handoff_created", format!("scan-other-{:016x}",
+            path.bytes().fold(0u64, |a, b| a.wrapping_mul(31).wrapping_add(b as u64))))
+    }
+}
+
+async fn run_deep_scan(
+    orchestrator_dir: PathBuf,
+    log_tx: crate::core::stream::LogTx,
+    _gate_rx: crate::core::stream::GateRx,
+) -> anyhow::Result<()> {
+    use crate::core::stream::LogEvent;
+    use crate::core::db::EventType;
+
+    let send = |msg: String| { let _ = log_tx.send(LogEvent::Line(msg)); };
+
+    send("🔍 Listando páginas do ai-memory...".to_string());
+    let pages = list_ai_memory_pages();
+
+    if pages.is_empty() {
+        send("⚠ Nenhuma página encontrada. Verifique se o ai-memory CLI está disponível.".to_string());
+        let _ = log_tx.send(LogEvent::Done);
+        return Ok(());
+    }
+    send(format!("📄 {} páginas encontradas. Iniciando ingestão...", pages.len()));
+
+    let config = crate::core::config::Config::load()?;
+    let db = crate::core::db::Db::open(
+        &orchestrator_dir,
+        &config.workspace_dir,
+        &format!("deep-scan-{}", chrono::Utc::now().timestamp()),
+        "deep-scan",
+        "scan",
+        "HEAD", "", "",
+    )?;
+
+    let mut ingested = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for page in &pages {
+        let (event_type_str, run_id) = extract_metadata_from_path(&page.path);
+        let event_type = match event_type_str {
+            "handoff_created" => EventType::HandoffCreated,
+            "gate_passed"     => EventType::GatePassed,
+            _                 => EventType::GateEnriched,
+        };
+
+        match db.reconstruct_event(&run_id, event_type, &page.title, &page.path).await {
+            Ok(true)  => { ingested += 1; send(format!("  ✅ {}", page.path)); }
+            Ok(false) => { skipped += 1; }
+            Err(e)    => { failed += 1; send(format!("  ❌ {}: {}", page.path, e)); }
+        }
+    }
+
+    send(format!(
+        "\n✅ Deep Scan concluído!\n   Ingeridos: {}\n   Já existiam: {}\n   Erros: {}",
+        ingested, skipped, failed
+    ));
+    let _ = log_tx.send(LogEvent::Done);
     Ok(())
 }
 

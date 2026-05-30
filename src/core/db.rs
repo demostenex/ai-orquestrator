@@ -804,6 +804,61 @@ impl Db {
         }).await?
     }
 
+    /// Reconstrói um evento a partir de uma página do ai-memory.
+    /// Retorna Ok(true) se inserido, Ok(false) se já existia (idempotente via memory_url).
+    pub async fn reconstruct_event(
+        &self,
+        run_id: &str,
+        event_type: EventType,
+        content_summary: &str,
+        memory_url: &str,
+    ) -> Result<bool> {
+        let pool = self.pool.clone();
+        let pid = self.project_id.clone();
+        let rid = run_id.to_string();
+        let etype = event_type.as_str().to_string();
+        let summary = content_summary.to_string();
+        let url = memory_url.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+
+            // Idempotência: pula se memory_url já existe
+            let exists: bool = conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE memory_url = ?1",
+                params![url],
+                |r| r.get::<_, i64>(0),
+            )? > 0;
+
+            if exists { return Ok(false); }
+
+            // Garante que existe um run placeholder para este run_id
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO runs
+                 (id, project_id, step_id, status, mode, base_commit, plan_hash, memory_hash, created_at, updated_at)
+                 VALUES (?1, ?2, 'deep-scan', 'completed', 'scan', '', '', '', datetime('now'), datetime('now'))",
+                params![rid, pid],
+            );
+
+            let sequence: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ?1",
+                params![rid],
+                |r| r.get(0),
+            )?;
+
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO events
+                 (project_id, run_id, sequence, event_type, from_agent, to_agent,
+                  content_summary, content_hash, enriched_by_human, human_notes, memory_url, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, 'ai-memory', NULL, ?5, NULL, 0, NULL, ?6, ?7)",
+                params![pid, rid, sequence, etype, summary, url, now],
+            )?;
+
+            Ok(true)
+        }).await?
+    }
+
     /// Resumo do projeto para a Home Screen (Fase 5).
     /// Leitura somente — não requer project_id nem run_id.
     pub async fn get_home_summary(orchestrator_dir: PathBuf) -> Result<ProjectSummary> {
