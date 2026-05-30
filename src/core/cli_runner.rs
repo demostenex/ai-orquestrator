@@ -99,7 +99,8 @@ pub fn select_cli(role: &str) -> Result<Option<String>> {
 
 /// Envia o prompt para o CLI via stdin e exibe a resposta em streaming (linha a linha),
 /// acumulando tudo para retornar ao final.
-pub fn run_cli(cli_cmd: &str, prompt: &str) -> Result<String> {
+/// Se `log` for Some, envia as linhas pelo canal em vez de imprimir no stdout.
+pub fn run_cli(cli_cmd: &str, prompt: &str, log: Option<&crate::core::stream::LogTx>) -> Result<String> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(cli_cmd)
@@ -121,7 +122,11 @@ pub fn run_cli(cli_cmd: &str, prompt: &str) -> Result<String> {
 
     for line in reader.lines() {
         let line = line?;
-        println!("  {}", line);
+        if let Some(tx) = log {
+            let _ = tx.send(crate::core::stream::LogEvent::Line(line.clone()));
+        } else {
+            println!("  {}", line);
+        }
         full_output.push_str(&line);
         full_output.push('\n');
     }

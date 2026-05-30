@@ -124,6 +124,7 @@ pub async fn run_planning_turn(
     agent: &str,
     role: &str,
     cli_name: &str,
+    log: Option<crate::core::stream::LogTx>,
 ) -> Result<PlanTurn> {
     // 1. Buscar histórico de turnos
     let turns = db.get_plan_turns(plan_id).await?;
@@ -135,7 +136,7 @@ pub async fn run_planning_turn(
     let content = tokio::task::spawn_blocking({
         let cli = cli_name.to_string();
         let p = prompt.clone();
-        move || run_cli(&cli, &p)
+        move || run_cli(&cli, &p, log.as_ref())
     })
     .await??;
 
@@ -163,52 +164,59 @@ pub async fn run_planning_loop(
     plan_id: &str,
     agents: &[(&str, &str, &str)], // (agent, role, cli_name)
     max_turns: usize,
+    log: Option<crate::core::stream::LogTx>,
+    gate_rx: Option<crate::core::stream::GateRx>,
 ) -> Result<()> {
     if agents.is_empty() {
         return Err(anyhow!("Lista de agentes não pode estar vazia"));
     }
 
+    let log_line = |msg: String| {
+        if let Some(ref tx) = log {
+            let _ = tx.send(crate::core::stream::LogEvent::Line(msg.clone()));
+        } else {
+            println!("{}", msg);
+        }
+    };
+
     for turn_index in 0..max_turns {
         let (agent, role, cli_name) = agents[turn_index % agents.len()];
 
-        println!(
-            "\n══════════════════════════════════════════════════════════"
-        );
-        println!(
-            " 🔄 TURNO {} | Agente: {} ({})",
-            turn_index + 1,
-            agent.cyan(),
-            role
-        );
-        println!(
-            "══════════════════════════════════════════════════════════"
-        );
+        log_line(format!("══ TURNO {} | {} ({}) ══", turn_index + 1, agent, role));
 
-        // Executa um turno de planejamento
-        let turn = run_planning_turn(db, plan_id, agent, role, cli_name).await?;
+        let turn = run_planning_turn(db, plan_id, agent, role, cli_name, log.clone()).await?;
 
-        // Apresenta ao usuário via portão interativo
-        match interactive_plan_gate(orchestrator_dir, db, plan_id, &turn.content).await {
-            Ok(_) => {
-                // Usuário aprovou ou enriqueceu → continua para próximo turno
-                println!(" {} Turno concluído. Avançando...\n", "✔".green());
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("planejamento_finalizado") {
-                    println!(" {} Planejamento finalizado pelo usuário.\n", "✅".green());
-                } else {
-                    println!(" {} Planejamento abortado pelo usuário.\n", "🛑".red());
+        // Gate: TUI nativo ou inquire (modo CLI)
+        if let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) {
+            let _ = tx.send(crate::core::stream::LogEvent::GateNeeded {
+                content: turn.content.clone(),
+            });
+            match rx.recv() {
+                Ok(crate::core::stream::GateDecision::Continue) => {
+                    log_line(" ✔ Turno aprovado. Avançando...".to_string());
                 }
-                return Ok(());
+                Ok(crate::core::stream::GateDecision::Abort) | Err(_) => {
+                    log_line(" 🛑 Planejamento abortado.".to_string());
+                    return Ok(());
+                }
+            }
+        } else {
+            match interactive_plan_gate(orchestrator_dir, db, plan_id, &turn.content).await {
+                Ok(_) => println!(" {} Turno concluído. Avançando...\n", "✔".green()),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("planejamento_finalizado") {
+                        println!(" {} Planejamento finalizado pelo usuário.\n", "✅".green());
+                    } else {
+                        println!(" {} Planejamento abortado pelo usuário.\n", "🛑".red());
+                    }
+                    return Ok(());
+                }
             }
         }
     }
 
-    println!(
-        "Limite de {} turnos atingido. Planejamento encerrado.",
-        max_turns
-    );
+    log_line(format!("Limite de {} turnos atingido. Planejamento encerrado.", max_turns));
     Ok(())
 }
 
@@ -370,6 +378,8 @@ async fn continue_plan(
         &plan_id,
         &agents,
         max_turns,
+        None,
+        None,
     )
     .await?;
 

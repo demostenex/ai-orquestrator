@@ -1,4 +1,5 @@
 pub mod cli_runner;
+pub mod stream;
 pub mod config;
 pub mod db;
 pub mod git;

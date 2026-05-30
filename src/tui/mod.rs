@@ -26,6 +26,8 @@ enum AppView {
     Selector(SelectorCtx),
     Dashboard,
     Prompt(PromptState),
+    Executing,
+    Gate,
 }
 
 #[derive(Clone)]
@@ -38,8 +40,21 @@ enum SelectorCtx {
 // Ações que precisam suspender o Ratatui (executar comando externo com output)
 enum Suspend {
     NewPlan,
-    ContinuePlanning { plan_id: String, cli1: String, cli2: Option<String>, max_turns: usize },
     ExecuteDev { plan_id: String },
+}
+
+// ── Estado de execução em background ─────────────────────────────────────────
+
+struct ExecState {
+    title: String,
+    lines: Vec<String>,
+    gate_content: Option<String>,
+}
+
+impl ExecState {
+    fn new(title: String) -> Self {
+        Self { title, lines: vec![], gate_content: None }
+    }
 }
 
 // ── Prompt: coleta de campos dentro do TUI ────────────────────────────────────
@@ -96,6 +111,9 @@ struct TuiApp {
     plans: Vec<PlanSummary>,
     summary: ProjectSummary,
     orchestrator_dir: PathBuf,
+    exec: ExecState,
+    log_rx: Option<crate::core::stream::LogRx>,
+    gate_tx: Option<crate::core::stream::GateTx>,
 }
 
 impl TuiApp {
@@ -111,6 +129,9 @@ impl TuiApp {
             plans,
             summary,
             orchestrator_dir,
+            exec: ExecState::new(String::new()),
+            log_rx: None,
+            gate_tx: None,
         }
     }
 }
@@ -158,6 +179,50 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
             continue;
         }
 
+        // Drena o canal de log (execução em background)
+        if matches!(app.view, AppView::Executing | AppView::Gate) {
+            if let Some(ref rx) = app.log_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(crate::core::stream::LogEvent::Line(s)) => {
+                            app.exec.lines.push(s);
+                            // mantém só as últimas 200 linhas
+                            if app.exec.lines.len() > 200 {
+                                app.exec.lines.drain(..app.exec.lines.len() - 200);
+                            }
+                        }
+                        Ok(crate::core::stream::LogEvent::GateNeeded { content }) => {
+                            app.exec.gate_content = Some(content);
+                            app.view = AppView::Gate;
+                            break;
+                        }
+                        Ok(crate::core::stream::LogEvent::Done) => {
+                            app.log_rx = None;
+                            app.gate_tx = None;
+                            app.summary = Db::get_home_summary(app.orchestrator_dir.clone()).await.unwrap_or_default();
+                            app.plans = load_plans(&app.orchestrator_dir).await;
+                            app.view = AppView::Home;
+                            break;
+                        }
+                        Ok(crate::core::stream::LogEvent::Failed(e)) => {
+                            app.exec.lines.push(format!("ERRO: {}", e));
+                            app.log_rx = None;
+                            app.gate_tx = None;
+                            app.view = AppView::Executing; // mantém na tela para o user ver o erro
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            app.log_rx = None;
+                            app.gate_tx = None;
+                            app.view = AppView::Home;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         match dispatch_key(app, key.code) {
             LoopCmd::Continue => {}
             LoopCmd::Quit => break,
@@ -166,6 +231,32 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
             }
             LoopCmd::Suspend(action) => {
                 suspend_for_input(terminal, app, action).await?;
+            }
+            LoopCmd::StartPlanning { plan_id, cli1, cli2, max_turns } => {
+                use crate::core::stream::*;
+                let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(256);
+                let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<GateDecision>(1);
+                let dir = app.orchestrator_dir.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(run_planning_background(
+                        dir, plan_id, cli1, cli2, max_turns, log_tx.clone(), gate_rx,
+                    ));
+                    if let Err(e) = result {
+                        let _ = log_tx.send(LogEvent::Failed(e.to_string()));
+                    }
+                });
+                app.exec = ExecState::new("Planejamento em andamento...".to_string());
+                app.log_rx = Some(log_rx);
+                app.gate_tx = Some(gate_tx);
+                app.view = AppView::Executing;
+            }
+            LoopCmd::GateDecide(decision) => {
+                if let Some(ref tx) = app.gate_tx {
+                    let _ = tx.send(decision);
+                }
+                app.exec.gate_content = None;
+                app.view = AppView::Executing;
             }
             LoopCmd::LoadDashboard(plan_id) => {
                 let data = DashboardState::load(app.orchestrator_dir.clone(), plan_id).await?;
@@ -197,6 +288,8 @@ enum LoopCmd {
     Quit,
     GoTo(AppView),
     Suspend(Suspend),
+    StartPlanning { plan_id: String, cli1: String, cli2: Option<String>, max_turns: usize },
+    GateDecide(crate::core::stream::GateDecision),
     LoadDashboard(String),
     ReloadDashboard,
     LoadMemory(String),
@@ -208,6 +301,8 @@ fn dispatch_key(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
         AppView::Selector(_) => dispatch_selector(app, key),
         AppView::Dashboard => dispatch_dashboard(app, key),
         AppView::Prompt(_) => dispatch_prompt(app, key),
+        AppView::Executing => dispatch_executing(key),
+        AppView::Gate => dispatch_gate(key),
     }
 }
 
@@ -306,10 +401,26 @@ fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
                     let cli1 = collected[0].clone();
                     let cli2 = if collected[1].is_empty() { None } else { Some(collected[1].clone()) };
                     let max_turns: usize = collected[2].parse().unwrap_or(10);
-                    LoopCmd::Suspend(Suspend::ContinuePlanning { plan_id, cli1, cli2, max_turns })
+                    LoopCmd::StartPlanning { plan_id, cli1, cli2, max_turns }
                 }
             }
         }
+        _ => LoopCmd::Continue,
+    }
+}
+
+fn dispatch_executing(key: KeyCode) -> LoopCmd {
+    match key {
+        KeyCode::Char('q') | KeyCode::Esc => LoopCmd::GoTo(AppView::Home),
+        _ => LoopCmd::Continue,
+    }
+}
+
+fn dispatch_gate(key: KeyCode) -> LoopCmd {
+    use crate::core::stream::GateDecision;
+    match key {
+        KeyCode::Char('c') | KeyCode::Enter => LoopCmd::GateDecide(GateDecision::Continue),
+        KeyCode::Char('a') | KeyCode::Esc => LoopCmd::GateDecide(GateDecision::Abort),
         _ => LoopCmd::Continue,
     }
 }
@@ -344,6 +455,8 @@ fn render_app(f: &mut Frame<'_>, app: &mut TuiApp) {
             dashboard::render_body(f, &app.dash_data, &mut app.dash_ui, chunks[1]);
         }
         AppView::Prompt(ps) => render_prompt(f, ps, chunks[1]),
+        AppView::Executing => render_executing(f, &app.exec, chunks[1]),
+        AppView::Gate => render_gate(f, &app.exec, chunks[1]),
     }
 
     render_footer(f, &app.view, chunks[2]);
@@ -428,6 +541,58 @@ fn render_prompt(f: &mut Frame, ps: &PromptState, area: Rect) {
     f.render_widget(panel, area);
 }
 
+fn render_executing(f: &mut Frame, exec: &ExecState, area: Rect) {
+    let visible: Vec<&str> = exec.lines.iter().rev().take(30).rev().map(|s| s.as_str()).collect();
+    let text = visible.join("\n");
+    let panel = Paragraph::new(text.as_str())
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(
+                    format!(" ⠋ {} ", exec.title),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ))
+                .title_alignment(Alignment::Center),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(panel, area);
+}
+
+fn render_gate(f: &mut Frame, exec: &ExecState, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(5), Constraint::Length(6)])
+        .split(area);
+
+    // Preview do conteúdo do plano
+    let preview = exec.gate_content.as_deref().unwrap_or("");
+    let preview_text: String = preview.lines().take(20).collect::<Vec<_>>().join("\n");
+    let plan_panel = Paragraph::new(preview_text.as_str())
+        .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL).title(" Plano Gerado ").title_alignment(Alignment::Center))
+        .wrap(Wrap { trim: true });
+    f.render_widget(plan_panel, chunks[0]);
+
+    // Gate de decisão
+    let gate = Paragraph::new(
+        "\n  [C] / Enter  →  Continuar (aprovar turno)\n  [A] / Esc     →  Abortar planejamento"
+    )
+    .style(Style::default().fg(Color::Yellow))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(Span::styled(
+                " ✋ Portão — Decisão Necessária ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
+            .title_alignment(Alignment::Center),
+    );
+    f.render_widget(gate, chunks[1]);
+}
+
 fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
     let text = match view {
         AppView::Home =>
@@ -438,6 +603,10 @@ fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
             "  ↑↓: Feed   Enter: Carregar Handoff   r: Recarregar   q/Esc: Voltar",
         AppView::Prompt(_) =>
             "  Enter: Confirmar   Backspace: Apagar   Esc: Cancelar",
+        AppView::Executing =>
+            "  q: Voltar ao Menu (planejamento continua em background)",
+        AppView::Gate =>
+            "  C/Enter: Continuar   A/Esc: Abortar",
     };
     let footer = Paragraph::new(text)
         .style(Style::default().fg(Color::Gray))
@@ -464,14 +633,6 @@ async fn suspend_for_input(
     match action {
         Suspend::NewPlan => {
             crate::commands::plan::execute(PlanCommands::New { title: None }).await?;
-        }
-        Suspend::ContinuePlanning { plan_id, cli1, cli2, max_turns } => {
-            crate::commands::plan::execute(PlanCommands::Continue {
-                plan_id: Some(plan_id),
-                cli1,
-                cli2,
-                max_turns,
-            }).await?;
         }
         Suspend::ExecuteDev { plan_id } => {
             crate::commands::run::execute(None, false, false, false, Some(plan_id)).await?;
@@ -500,5 +661,51 @@ async fn load_plans(orchestrator_dir: &PathBuf) -> Vec<PlanSummary> {
         return vec![];
     };
     db.list_plans().await.unwrap_or_default()
+}
+
+/// Executa o loop de planejamento em background (chamado de std::thread com runtime próprio).
+async fn run_planning_background(
+    orchestrator_dir: PathBuf,
+    plan_id: String,
+    cli1: String,
+    cli2: Option<String>,
+    max_turns: usize,
+    log_tx: crate::core::stream::LogTx,
+    gate_rx: crate::core::stream::GateRx,
+) -> anyhow::Result<()> {
+    use crate::commands::plan::run_planning_loop;
+    use crate::core::db::Db;
+    use uuid::Uuid;
+
+    let config = crate::core::config::Config::load()?;
+
+    let agents_owned: Vec<(String, String, String)> = if let Some(ref cli_dev) = cli2 {
+        vec![
+            ("architect".to_string(), "Arquiteto".to_string(), cli1.clone()),
+            ("dev".to_string(), "Dev".to_string(), cli_dev.clone()),
+        ]
+    } else {
+        vec![("architect".to_string(), "Arquiteto".to_string(), cli1.clone())]
+    };
+    let agents: Vec<(&str, &str, &str)> = agents_owned
+        .iter()
+        .map(|(a, r, c)| (a.as_str(), r.as_str(), c.as_str()))
+        .collect();
+
+    let db = Db::open(
+        &orchestrator_dir,
+        &config.workspace_dir,
+        &Uuid::new_v4().to_string(),
+        &config.step_id,
+        "planning",
+        "HEAD",
+        "",
+        "",
+    )?;
+
+    run_planning_loop(&db, &orchestrator_dir, &plan_id, &agents, max_turns, Some(log_tx.clone()), Some(gate_rx)).await?;
+
+    let _ = log_tx.send(crate::core::stream::LogEvent::Done);
+    Ok(())
 }
 

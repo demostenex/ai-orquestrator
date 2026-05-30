@@ -199,7 +199,7 @@ async fn run_dev_cycle(
         }
         AgentMode::Cli(cli) => {
             print_agent_prompt("IA DEV", cli, &final_dev_user_prompt);
-            let raw = run_cli(cli, &final_dev_user_prompt)?;
+            let raw = run_cli(cli, &final_dev_user_prompt, None)?;
             print_agent_done("IA DEV", cli);
             write_string(&dev_response_path, &raw)?;
             let p: DevResponse = serde_json::from_str(strip_json_fences(&raw))?;
