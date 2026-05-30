@@ -199,7 +199,7 @@ async fn run_dev_cycle(
         }
         AgentMode::Cli(cli) => {
             print_agent_prompt("IA DEV", cli, &final_dev_user_prompt);
-            let raw = run_cli(cli, &final_dev_user_prompt, None)?;
+            let raw = run_cli(cli, &final_dev_user_prompt, None::<crate::core::stream::LogTx>)?;
             print_agent_done("IA DEV", cli);
             write_string(&dev_response_path, &raw)?;
             let p: DevResponse = serde_json::from_str(strip_json_fences(&raw))?;
@@ -544,4 +544,201 @@ pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan
     }
 
     Ok(())
+}
+
+/// Versão nativa do loop dev para o TUI (background thread).
+/// Substitui `execute` quando chamado do Ratatui — sem println!, sem inquire, sem stdin.
+pub async fn execute_tui(
+    plan_id: String,
+    cli_dev: String,
+    cli_audit: Option<String>,
+    log_tx: crate::core::stream::LogTx,
+    gate_rx: crate::core::stream::GateRx,
+) -> anyhow::Result<()> {
+    use crate::core::stream::{GateDecision, LogEvent};
+
+    let send = |msg: String| { let _ = log_tx.send(LogEvent::Line(msg)); };
+    let send_gate = |content: String, gate_type: &str| {
+        let _ = log_tx.send(LogEvent::GateNeeded { content, gate_type: gate_type.to_string() });
+    };
+    let recv_gate = || {
+        gate_rx.recv_timeout(std::time::Duration::from_secs(7200))
+            .unwrap_or(GateDecision::Abort)
+    };
+
+    let config = Config::load()?;
+
+    if !git::is_clean_tree(&config.workspace_dir)? {
+        return Err(anyhow::anyhow!("working tree dirty — commit ou stash antes de rodar"));
+    }
+
+    let memory_path = config.orchestrator_dir.join("memory").join("context.md");
+    let memory = std::fs::read_to_string(&memory_path).unwrap_or_default();
+    let plan_path = config.orchestrator_dir.join("plan.md");
+    let plan = std::fs::read_to_string(&plan_path).unwrap_or_default();
+    let plan_hash = compute_sha256(&plan);
+    let memory_hash = compute_sha256(&memory);
+    let base_commit = git::get_head_commit(&config.workspace_dir)?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+
+    let db = Db::open(
+        &config.orchestrator_dir, &config.workspace_dir,
+        &run_id, &config.step_id, "auto",
+        &base_commit, &plan_hash, &memory_hash,
+    )?;
+
+    let reset = db.reset_in_progress_tasks(&plan_id).await?;
+    if reset > 0 { send(format!("⚠ {} tarefa(s) in_progress → pending", reset)); }
+
+    let plan_title = db.get_plan_title(&plan_id).await.unwrap_or_default();
+    send(format!("📋 Plano: {} | Dev: {}", plan_title, cli_dev));
+
+    let mut pending_notes: Option<String> = None;
+
+    loop {
+        let task = db.pick_next_task(&plan_id).await?;
+        if task.is_none() {
+            send("✅ Todas as tarefas concluídas!".to_string());
+            let _ = log_tx.send(LogEvent::Done);
+            return Ok(());
+        }
+        let task = task.unwrap();
+        send(format!("\n══ Tarefa: {} ══", task.description));
+
+        let all_tasks = db.get_plan_tasks(&plan_id).await.unwrap_or_default();
+        let dev_user_prompt = dev::build_dev_task_prompt(&plan_title, &all_tasks, &task, pending_notes.as_deref());
+        pending_notes = None;
+
+        let dev_system = dev::system_prompt();
+        let final_prompt = format!("=== SISTEMA ===\n{dev_system}\n\n=== USUÁRIO ===\n{dev_user_prompt}");
+
+        db.log_event(crate::core::db::EventType::PromptSent, Some("orchestrator"), Some("dev"),
+            Some(&format!("[Task {}] Prompt enviado", task.id)), None, false, None).await?;
+
+        send(format!("⏳ IA Dev ({}) trabalhando...", cli_dev));
+
+        let raw = {
+            let cli = cli_dev.clone();
+            let p = final_prompt.clone();
+            let tx = log_tx.clone();
+            tokio::task::spawn_blocking(move || run_cli(&cli, &p, Some(tx))).await??
+        };
+
+        send("✔ Dev concluído. Processando resposta...".to_string());
+
+        // Parse e validação
+        let dev_response: crate::schemas::DevResponse = match serde_json::from_str(strip_json_fences(&raw)) {
+            Ok(r) => r,
+            Err(e) => {
+                send(format!("❌ JSON inválido: {}", e));
+                db.update_task_status("dev", &task.id, "pending").await.ok();
+                continue;
+            }
+        };
+
+        // Security scan
+        let violations = crate::core::security::scan_diff(&dev_response.diff);
+        if !violations.is_empty() {
+            for v in &violations {
+                send(format!("🚫 Segurança: {:?}", v));
+                db.log_event(crate::core::db::EventType::SecurityBlocked, Some("security"), None,
+                    Some(&format!("{:?}", v)), None, false, None).await?;
+            }
+            send_gate("Violações de segurança detectadas. Abortar tarefa?".to_string(), "error");
+            match recv_gate() {
+                GateDecision::Abort => {
+                    db.update_task_status("dev", &task.id, "blocked").await.ok();
+                    continue;
+                }
+                _ => {} // usuário forçou continuar
+            }
+        }
+
+        // Parse diff
+        let parsed_diff = match crate::core::patch::parse_diff(&dev_response.diff) {
+            Ok(d) => d,
+            Err(e) => { send(format!("❌ Diff inválido: {}", e)); db.update_task_status("dev", &task.id, "pending").await.ok(); continue; }
+        };
+
+        let patch_hash = crate::core::patch::compute_patch_hash(&parsed_diff.raw);
+        let patch_path = config.orchestrator_dir.join("patches").join(format!("{}-{}.diff", run_id, &task.id[..8]));
+        std::fs::write(&patch_path, &parsed_diff.raw)?;
+
+        if let Err(e) = git::apply_check(&config.workspace_dir, &patch_path) {
+            send(format!("❌ git apply --check falhou: {}", e));
+            db.update_task_status("dev", &task.id, "pending").await.ok();
+            continue;
+        }
+        send("✔ git apply --check passou.".to_string());
+        db.log_event(crate::core::db::EventType::GitCheckPassed, Some("dev"), Some("auditor"),
+            Some(&format!("[Task {}] Check passou", task.id)), Some(&patch_hash), false, None).await?;
+
+        // Gate: revisão do diff
+        let diff_lines: Vec<&str> = parsed_diff.raw.lines().collect();
+        let preview_lines = diff_lines.iter().take(30).cloned().collect::<Vec<_>>().join("\n");
+        let diff_preview = format!(
+            "Arquivos: {}\nRiscos: {}\n\n{}{}",
+            parsed_diff.files_modified.join(", "),
+            if dev_response.risks.is_empty() { "nenhum".to_string() } else { dev_response.risks.join(", ") },
+            preview_lines,
+            if diff_lines.len() > 30 { format!("\n... (+{} linhas)", diff_lines.len() - 30) } else { String::new() }
+        );
+        send_gate(diff_preview, "diff_review");
+
+        match recv_gate() {
+            GateDecision::Continue => {}
+            GateDecision::Enrich(notes) => { pending_notes = Some(notes); db.update_task_status("dev", &task.id, "pending").await.ok(); continue; }
+            GateDecision::Abort | GateDecision::Finalize => {
+                send("❌ Diff rejeitado.".to_string());
+                db.update_task_status("dev", &task.id, "pending").await.ok();
+                continue;
+            }
+        }
+
+        db.log_event(crate::core::db::EventType::GatePassed, Some("dev"), Some("auditor"),
+            Some(&format!("[Task {}] Diff aprovado", task.id)), Some(&patch_hash), false, None).await?;
+
+        // Gate: aplicar patch
+        send_gate(
+            format!("Aplicar patch?\n\nArquivos: {}\nHash: {}", parsed_diff.files_modified.join(", "), &patch_hash[..16]),
+            "apply"
+        );
+
+        let applied = match recv_gate() {
+            GateDecision::Continue => {
+                git::apply_patch(&config.workspace_dir, &patch_path)?;
+                send("✔ Patch aplicado.".to_string());
+                db.log_event(crate::core::db::EventType::PatchApplied, Some("orchestrator"), Some("dev"),
+                    Some(&format!("[Task {}] Patch aplicado", task.id)), Some(&patch_hash), false, None).await?;
+                true
+            }
+            _ => { send("⏭ Patch não aplicado (skipped).".to_string()); false }
+        };
+
+        // Gate inter-tarefa
+        let inter_info = format!(
+            "Tarefa: {}\nStatus: {}\nPatch: {}",
+            task.description,
+            if applied { "aplicado" } else { "skipped" },
+            &patch_hash[..16]
+        );
+        send_gate(inter_info, "inter_task");
+
+        match recv_gate() {
+            GateDecision::Continue => {
+                db.update_task_status("dev", &task.id, "completed").await?;
+                send(format!("✅ '{}' concluída.", task.description));
+            }
+            GateDecision::Enrich(notes) => {
+                pending_notes = Some(notes);
+                db.update_task_status("dev", &task.id, "pending").await.ok();
+                send("↩ Repetindo tarefa com notas...".to_string());
+            }
+            GateDecision::Abort | GateDecision::Finalize => {
+                send("🛑 Dev Mode abortado pelo usuário.".to_string());
+                let _ = log_tx.send(LogEvent::Done);
+                return Ok(());
+            }
+        }
+    }
 }

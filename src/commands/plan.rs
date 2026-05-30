@@ -136,7 +136,7 @@ pub async fn run_planning_turn(
     let content = tokio::task::spawn_blocking({
         let cli = cli_name.to_string();
         let p = prompt.clone();
-        move || run_cli(&cli, &p, log.as_ref())
+        move || run_cli(&cli, &p, log.clone())
     })
     .await??;
 
@@ -190,6 +190,7 @@ pub async fn run_planning_loop(
         if let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) {
             let _ = tx.send(crate::core::stream::LogEvent::GateNeeded {
                 content: turn.content.clone(),
+                gate_type: "planning".to_string(),
             });
             match rx.recv() {
                 Ok(crate::core::stream::GateDecision::Continue) => {

@@ -1,10 +1,11 @@
 use std::sync::mpsc;
 
-/// Eventos enviados do planning thread → TUI.
+/// Eventos enviados do planning/dev thread → TUI.
 #[derive(Debug)]
 pub enum LogEvent {
     Line(String),
-    GateNeeded { content: String },
+    /// gate_type: "planning" | "diff_review" | "apply" | "inter_task" | "error"
+    GateNeeded { content: String, gate_type: String },
     Done,
     Failed(String),
 }

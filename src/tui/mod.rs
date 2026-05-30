@@ -12,7 +12,6 @@ pub mod dashboard;
 pub mod home;
 pub mod plan_selector;
 
-use crate::cli::PlanCommands;
 use crate::core::db::{Db, ProjectSummary};
 use crate::schemas::PlanSummary;
 use dashboard::{DashboardCmd, DashboardState, DashboardUiState};
@@ -37,10 +36,6 @@ enum SelectorCtx {
     ForDev,
 }
 
-// Ações que precisam suspender o Ratatui (executar comando externo com output)
-enum Suspend {
-    ExecuteDev { plan_id: String },
-}
 
 // ── Estado de execução em background ─────────────────────────────────────────
 
@@ -48,11 +43,12 @@ struct ExecState {
     title: String,
     lines: Vec<String>,
     gate_content: Option<String>,
+    gate_type: String, // "planning" | "diff_review" | "apply" | "inter_task" | "error"
 }
 
 impl ExecState {
     fn new(title: String) -> Self {
-        Self { title, lines: vec![], gate_content: None }
+        Self { title, lines: vec![], gate_content: None, gate_type: String::new() }
     }
 }
 
@@ -68,6 +64,7 @@ enum PromptNext {
     ContinuePlanning { plan_id: String },
     NewPlan,
     GateEnrich,
+    DevMode { plan_id: String },
 }
 
 struct PromptState {
@@ -90,6 +87,20 @@ impl PromptState {
             buffer: String::new(),
             collected: Vec::new(),
             next: PromptNext::NewPlan,
+        }
+    }
+
+    fn for_dev(plan_id: String) -> Self {
+        Self {
+            title: "Executar Modo Dev",
+            fields: vec![
+                PromptField { label: "CLI para a IA Dev (ex: claude, gemini)", optional: false, default: None },
+                PromptField { label: "CLI para a Auditora (vazio = aprovação automática)", optional: true, default: None },
+            ],
+            current: 0,
+            buffer: String::new(),
+            collected: Vec::new(),
+            next: PromptNext::DevMode { plan_id },
         }
     }
 
@@ -218,8 +229,9 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                                 app.exec.lines.drain(..app.exec.lines.len() - 200);
                             }
                         }
-                        Ok(crate::core::stream::LogEvent::GateNeeded { content }) => {
+                        Ok(crate::core::stream::LogEvent::GateNeeded { content, gate_type }) => {
                             app.exec.gate_content = Some(content);
+                            app.exec.gate_type = gate_type;
                             app.view = AppView::Gate;
                             break;
                         }
@@ -256,9 +268,6 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
             LoopCmd::GoTo(view) => {
                 app.view = view;
             }
-            LoopCmd::Suspend(action) => {
-                suspend_for_input(terminal, app, action).await?;
-            }
             LoopCmd::StartPlanning { plan_id, cli1, cli2, max_turns } => {
                 use crate::core::stream::*;
                 let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(256);
@@ -274,6 +283,24 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                     }
                 });
                 app.exec = ExecState::new("Planejamento em andamento...".to_string());
+                app.log_rx = Some(log_rx);
+                app.gate_tx = Some(gate_tx);
+                app.view = AppView::Executing;
+            }
+            LoopCmd::StartDev { plan_id, cli_dev, cli_audit } => {
+                use crate::core::stream::*;
+                let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(256);
+                let (gate_tx, gate_rx) = std::sync::mpsc::sync_channel::<GateDecision>(1);
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(crate::commands::run::execute_tui(
+                        plan_id, cli_dev, cli_audit, log_tx.clone(), gate_rx,
+                    ));
+                    if let Err(e) = result {
+                        let _ = log_tx.send(LogEvent::Failed(e.to_string()));
+                    }
+                });
+                app.exec = ExecState::new("Modo Dev em andamento...".to_string());
                 app.log_rx = Some(log_rx);
                 app.gate_tx = Some(gate_tx);
                 app.view = AppView::Executing;
@@ -320,8 +347,8 @@ enum LoopCmd {
     Continue,
     Quit,
     GoTo(AppView),
-    Suspend(Suspend),
     StartPlanning { plan_id: String, cli1: String, cli2: Option<String>, max_turns: usize },
+    StartDev { plan_id: String, cli_dev: String, cli_audit: Option<String> },
     CreatePlan { title: String },
     GateDecide(crate::core::stream::GateDecision),
     LoadDashboard(String),
@@ -388,7 +415,7 @@ fn dispatch_selector(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
             match ctx {
                 SelectorCtx::ForDashboard => LoopCmd::LoadDashboard(plan_id),
                 SelectorCtx::ForContinue => LoopCmd::GoTo(AppView::Prompt(PromptState::for_continue(plan_id))),
-                SelectorCtx::ForDev => LoopCmd::Suspend(Suspend::ExecuteDev { plan_id }),
+                SelectorCtx::ForDev => LoopCmd::GoTo(AppView::Prompt(PromptState::for_dev(plan_id))),
             }
         }
         _ => LoopCmd::Continue,
@@ -443,6 +470,11 @@ fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
                 PromptNext::GateEnrich => {
                     use crate::core::stream::GateDecision;
                     LoopCmd::GateDecide(GateDecision::Enrich(collected[0].clone()))
+                }
+                PromptNext::DevMode { plan_id } => {
+                    let cli_dev = collected[0].clone();
+                    let cli_audit = if collected[1].is_empty() { None } else { Some(collected[1].clone()) };
+                    LoopCmd::StartDev { plan_id: plan_id.clone(), cli_dev, cli_audit }
                 }
             }
         }
@@ -619,9 +651,15 @@ fn render_gate(f: &mut Frame, exec: &ExecState, area: Rect) {
     f.render_widget(plan_panel, chunks[0]);
 
     // Gate de decisão
-    let gate = Paragraph::new(
-        "\n  [C] / Enter  →  Continuar (aprovar turno)\n  [E]           →  Enriquecer (adicionar notas)\n  [F]           →  Finalizar planejamento\n  [A] / Esc     →  Abortar"
-    )
+    let gate_options = match exec.gate_type.as_str() {
+        "planning" => "\n  [C] / Enter  →  Continuar (próximo turno)\n  [E]          →  Enriquecer (adicionar notas)\n  [F]          →  Finalizar planejamento\n  [A] / Esc    →  Abortar",
+        "diff_review" => "\n  [C] / Enter  →  Aprovar diff\n  [E]          →  Enriquecer (notas para o Dev)\n  [A] / Esc    →  Rejeitar diff",
+        "apply" => "\n  [C] / Enter  →  Aplicar patch ao workspace\n  [A] / Esc    →  Pular (não aplicar)",
+        "inter_task" => "\n  [C] / Enter  →  Próxima tarefa\n  [E]          →  Repetir com notas\n  [A] / Esc    →  Encerrar Dev Mode",
+        "error" => "\n  [C] / Enter  →  Continuar mesmo assim (cuidado)\n  [A] / Esc    →  Abortar tarefa",
+        _ => "\n  [C] / Enter  →  Continuar\n  [A] / Esc    →  Abortar",
+    };
+    let gate = Paragraph::new(gate_options)
     .style(Style::default().fg(Color::Yellow))
     .block(
         Block::default()
@@ -661,38 +699,6 @@ fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
     f.render_widget(footer, area);
 }
 
-// ── Suspensão para inputs via inquire ─────────────────────────────────────────
-
-async fn suspend_for_input(
-    terminal: &mut AppTerminal,
-    app: &mut TuiApp,
-    action: Suspend,
-) -> Result<()> {
-    // Sai do modo raw temporariamente
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    match action {
-        Suspend::ExecuteDev { plan_id } => {
-            crate::commands::run::execute(None, false, false, false, Some(plan_id)).await?;
-        }
-    }
-
-    // Recarrega dados e volta ao home
-    app.summary = Db::get_home_summary(app.orchestrator_dir.clone()).await.unwrap_or_default();
-    app.plans = load_plans(&app.orchestrator_dir).await;
-    app.selector = SelectorState::new(app.plans.len());
-    app.view = AppView::Home;
-
-    // Re-entra no modo raw
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    terminal.hide_cursor()?;
-    terminal.clear()?;
-
-    Ok(())
-}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
