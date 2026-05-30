@@ -193,9 +193,13 @@ pub async fn run_planning_loop(
                 // Usuário aprovou ou enriqueceu → continua para próximo turno
                 println!(" {} Turno concluído. Avançando...\n", "✔".green());
             }
-            Err(_) => {
-                // Usuário escolheu Abortar ou Finalizar
-                println!(" {} Planejamento finalizado pelo usuário.\n", "🛑".yellow());
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("planejamento_finalizado") {
+                    println!(" {} Planejamento finalizado pelo usuário.\n", "✅".green());
+                } else {
+                    println!(" {} Planejamento abortado pelo usuário.\n", "🛑".red());
+                }
                 return Ok(());
             }
         }

@@ -239,6 +239,7 @@ pub async fn interactive_plan_gate(
     let options = vec![
         "Seguir (Aprovar) ✅",
         "Enriquecer (Adicionar instruções/notas) ✏️",
+        "Finalizar Planejamento ✅",
         "Abortar (Cancelar) ❌",
     ];
 
@@ -265,6 +266,8 @@ pub async fn interactive_plan_gate(
                 Ok(format!("{plan_content}\n\n[NOTAS DO HUMANO]\n{notes}"))
             }
         }
+        "Finalizar Planejamento ✅" => anyhow::bail!("planejamento_finalizado"),
+        "Abortar (Cancelar) ❌" => anyhow::bail!("planejamento_abortado"),
         _ => anyhow::bail!("Operação abortada no portão do plano."),
     }
 }
