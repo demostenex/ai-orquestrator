@@ -113,11 +113,35 @@ async fn run_dev_cycle(
     // Lógica real do ciclo (migração em andamento)
     // ========================================================================
 
-    // ── Prompt Dev com switch de acordo com current_task ─────────────────────
+    // ── Prompt Dev com contexto rico do plano (Passo 5.6 - Decisão D1) ───────
     let dev_user_prompt = if let Some(task) = current_task {
         let notes = previous_user_notes.as_deref();
-        // TODO: melhorar para passar título real + lista completa de tasks
-        dev::build_dev_task_prompt(plan_text, &[], task, notes)
+
+        if let Some(pid) = plan_id {
+            // Buscar título e lista completa de tarefas do plano
+            let plan_title = db.get_plan_title(pid).await?;
+            let all_tasks = db.get_plan_tasks(pid).await?;
+
+            // Log de transparência (recomendado pelo Auditor)
+            db.log_event(
+                EventType::PromptSent,
+                Some("orchestrator"),
+                Some("dev"),
+                Some(&format!(
+                    "[Task {}] Buscando contexto rico ({} tarefas) do plano no banco",
+                    task.id,
+                    all_tasks.len()
+                )),
+                None,
+                false,
+                None,
+            ).await?;
+
+            dev::build_dev_task_prompt(&plan_title, &all_tasks, task, notes)
+        } else {
+            // Fallback defensivo (modo plano sem plan_id)
+            dev::build_dev_task_prompt(plan_text, &[], task, notes)
+        }
     } else {
         dev::build_user_prompt(step_id, plan_text, memory_text, last_handoff, workspace_snapshot)
     };
