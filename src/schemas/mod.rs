@@ -136,6 +136,37 @@ pub enum CycleStatus {
     Applied,
 }
 
+// ── Passo 5.4: Tipos para o ciclo unificado (run_dev_cycle) ───────────────────
+
+/// Decisão retornada por um ciclo completo Dev → Auditor → Humano.
+/// Controla o fluxo do loop superior (especialmente em modo --plan).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CycleDecision {
+    /// Ciclo concluído com sucesso. Avançar (próxima tarefa no modo plano, ou encerrar no legado).
+    Proceed,
+    /// Repetir exatamente a mesma tarefa (mantém in_progress no DB).
+    /// O loop superior deve reutilizar o current_task e injetar as notas.
+    RepeatCurrentTask {
+        user_notes: Option<String>,
+    },
+    /// Enriquecer e repetir (decisão mais ampla).
+    EnrichAndRepeat {
+        user_notes: String,
+    },
+    /// Usuário abortou o processo.
+    Abort,
+}
+
+/// Resultado de um único ciclo executado por run_dev_cycle.
+#[derive(Debug)]
+pub struct CycleResult {
+    pub decision: CycleDecision,
+    pub approved: bool,
+    pub applied: bool,
+    /// Resumo curto para logging e eventos.
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CycleState {
     pub run_id: String,
