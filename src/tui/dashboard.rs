@@ -6,7 +6,7 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io;
 use std::path::PathBuf;
@@ -77,8 +77,16 @@ fn run_app<B: Backend>(
     orchestrator_dir: PathBuf,
     plan_id: String,
 ) -> Result<()> {
+    let mut audit_list_state = ListState::default();
+    let mut memory_content: Option<String> = None;
+
+    // Seleciona o primeiro evento por padrão (se houver)
+    if !state.recent_events.is_empty() {
+        audit_list_state.select(Some(0));
+    }
+
     loop {
-        terminal.draw(|f| ui(f, &state))?;
+        terminal.draw(|f| ui(f, &state, &mut audit_list_state, memory_content.as_deref()))?;
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -86,7 +94,6 @@ fn run_app<B: Backend>(
                     match key.code {
                         KeyCode::Char('q') => return Ok(()),
                         KeyCode::Char('r') => {
-                            // Reload: recria runtime local (barato para uso esporádico)
                             let new_state = {
                                 let rt = tokio::runtime::Runtime::new()?;
                                 rt.block_on(DashboardState::load(
@@ -95,6 +102,36 @@ fn run_app<B: Backend>(
                                 ))?
                             };
                             state = new_state;
+                            // Reset UI state após reload
+                            audit_list_state = ListState::default();
+                            memory_content = None;
+                            if !state.recent_events.is_empty() {
+                                audit_list_state.select(Some(0));
+                            }
+                        }
+                        KeyCode::Up => {
+                            if let Some(selected) = audit_list_state.selected() {
+                                if selected > 0 {
+                                    audit_list_state.select(Some(selected - 1));
+                                }
+                            }
+                        }
+                        KeyCode::Down => {
+                            let len = state.recent_events.len();
+                            if let Some(selected) = audit_list_state.selected() {
+                                if selected + 1 < len {
+                                    audit_list_state.select(Some(selected + 1));
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(selected) = audit_list_state.selected() {
+                                // Lista exibida é events.iter().rev(), então índice i → events[len-1-i]
+                                let len = state.recent_events.len();
+                                if let Some(ev) = state.recent_events.get(len.saturating_sub(1 + selected)) {
+                                    memory_content = Some(load_memory_for_run(&ev.run_id));
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -104,7 +141,12 @@ fn run_app<B: Backend>(
     }
 }
 
-fn ui(f: &mut Frame, state: &DashboardState) {
+fn ui(
+    f: &mut Frame,
+    state: &DashboardState,
+    audit_list_state: &mut ListState,
+    memory_content: Option<&str>,
+) {
     let size = f.area();
 
     // Layout principal: Vertical (Header | Body | Footer)
@@ -125,13 +167,13 @@ fn ui(f: &mut Frame, state: &DashboardState) {
         .block(Block::default().borders(Borders::ALL).title(format!("Plano: {}", state.plan_id)));
     f.render_widget(header, chunks[0]);
 
-    // === BODY: Horizontal 3 colunas (prep para Fase 4.3b) ===
+    // === BODY: Horizontal 3 colunas ===
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage(35), // Tarefas
-            Constraint::Percentage(40), // Audit Feed
-            Constraint::Percentage(25), // Memory (placeholder)
+            Constraint::Percentage(40), // Audit Feed (stateful)
+            Constraint::Percentage(25), // Memória (ai-memory)
         ])
         .split(chunks[1]);
 
@@ -155,12 +197,11 @@ fn ui(f: &mut Frame, state: &DashboardState) {
         .block(Block::default().borders(Borders::ALL).title("Tarefas do Plano"));
     f.render_widget(tasks_list, body_chunks[0]);
 
-    // Coluna 1: Feed de Auditoria (dados reais via JOIN plan→run, invertido para fluxo cronológico)
+    // Coluna 1: Audit Feed stateful (navegação com ↑↓ + Enter para carregar memória)
     let event_items: Vec<ListItem> = state
         .recent_events
         .iter()
-        .take(8) // 8 mais recentes (query ORDER BY timestamp DESC)
-        .rev()    // inverte para mais antigo (do recorte) no topo → fluxo de baixo para cima
+        .rev()
         .map(|ev| {
             let color = match ev.event_type.as_str() {
                 "security_blocked" | "audit_rejected" => Color::Red,
@@ -178,17 +219,49 @@ fn ui(f: &mut Frame, state: &DashboardState) {
         .collect();
 
     let audit_feed = List::new(event_items)
-        .block(Block::default().borders(Borders::ALL).title("Audit Feed (eventos do plano)"));
-    f.render_widget(audit_feed, body_chunks[1]);
+        .block(Block::default().borders(Borders::ALL).title("Audit Feed (↑↓ navega, Enter carrega)"))
+        .highlight_style(Style::default().fg(Color::Yellow).bg(Color::Rgb(40, 40, 60)))
+        .highlight_symbol("▶ ");
 
-    // Coluna 2: Placeholder Memory (Fase 4.3b trará navegação + ai-memory)
-    let memory_panel = Paragraph::new("Aguardando Seleção...\n\n(Fase 4.3b: Navegação + AI-Memory)")
-        .style(Style::default().fg(Color::Gray))
-        .block(Block::default().borders(Borders::ALL).title("Memória (AI-Memory)"));
+    f.render_stateful_widget(audit_feed, body_chunks[1], audit_list_state);
+
+    // Coluna 2: Memória — contexto do evento selecionado + handoff carregado
+    let len = state.recent_events.len();
+    let selected_event = audit_list_state
+        .selected()
+        .and_then(|i| state.recent_events.get(len.saturating_sub(1 + i)));
+
+    let memory_text: String = match (selected_event, memory_content) {
+        (Some(ev), Some(content)) => format!(
+            "── Evento #{} ──\nTipo : {}\nDe   : {} → {}\nTs   : {}\n\n{}\n────────────────\n\n{}",
+            ev.sequence,
+            ev.event_type,
+            ev.from_agent.as_deref().unwrap_or("-"),
+            ev.to_agent.as_deref().unwrap_or("-"),
+            &ev.timestamp[..19],
+            ev.content_summary.as_deref().unwrap_or("(sem resumo)"),
+            content,
+        ),
+        (Some(ev), None) => format!(
+            "── Evento #{} ──\nTipo : {}\nDe   : {} → {}\nTs   : {}\n\n{}\n────────────────\n\nEnter → carregar handoff do ai-memory",
+            ev.sequence,
+            ev.event_type,
+            ev.from_agent.as_deref().unwrap_or("-"),
+            ev.to_agent.as_deref().unwrap_or("-"),
+            &ev.timestamp[..19],
+            ev.content_summary.as_deref().unwrap_or("(sem resumo)"),
+        ),
+        (None, _) => "Selecione um evento com ↑↓\nEnter → carregar handoff do ai-memory\n\n(Fase 4.4 ativa)".to_string(),
+    };
+
+    let memory_panel = Paragraph::new(memory_text.as_str())
+        .style(Style::default().fg(Color::White))
+        .block(Block::default().borders(Borders::ALL).title("Memória (AI-Memory)"))
+        .wrap(Wrap { trim: true });
     f.render_widget(memory_panel, body_chunks[2]);
 
     // === FOOTER ===
-    let footer = Paragraph::new("q: Sair  |  r: Recarregar  |  Fase 4.3a - Progress + Reload + Real Events por Plano")
+    let footer = Paragraph::new("q: Sair  |  ↑↓: Navegar  |  Enter: Carregar Handoff  |  r: Recarregar  |  Fase 4.4")
         .style(Style::default().fg(Color::Gray))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[2]);
@@ -208,4 +281,43 @@ fn compute_progress(tasks: &[Task]) -> String {
         .map(|i| if i < filled { '█' } else { '░' })
         .collect();
     format!("Progresso: [{}] {}% ({}/{})", bar, pct, completed, total)
+}
+
+/// Invoca o ai-memory CLI para ler a página de handoff associada a um run_id.
+/// Usa `read-page --path` (com fallback para busca por run_id).
+/// Retorna o conteúdo ou mensagem de erro amigável.
+fn load_memory_for_run(run_id: &str) -> String {
+    // Tentativa 1: caminho canônico de handoff por run
+    let direct_path = format!("handoffs/run_{}.md", run_id);
+
+    if let Ok(output) = std::process::Command::new("ai-memory")
+        .args(["read-page", "--path", &direct_path])
+        .output()
+    {
+        if output.status.success() {
+            let body = String::from_utf8_lossy(&output.stdout).to_string();
+            if !body.trim().is_empty() {
+                return format!("📄 Handoff vinculado ao run {}\n\n{}", run_id, body);
+            }
+        }
+    }
+
+    // Tentativa 2: busca textual pelo run_id (FTS5)
+    if let Ok(output) = std::process::Command::new("ai-memory")
+        .args(["read-page", run_id])
+        .output()
+    {
+        if output.status.success() {
+            let body = String::from_utf8_lossy(&output.stdout).to_string();
+            if !body.trim().is_empty() {
+                return format!("🔍 Busca por run_id {} (melhor match)\n\n{}", run_id, body);
+            }
+        }
+    }
+
+    format!(
+        "Nenhuma página de handoff encontrada no ai-memory para o run_id:\n{}\n\n\
+         (Fase 4.3b: handoffs são sincronizados via write-page em etapas anteriores do ciclo)",
+        run_id
+    )
 }
