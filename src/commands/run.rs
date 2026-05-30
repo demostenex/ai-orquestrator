@@ -695,8 +695,25 @@ pub async fn execute_tui(
             }
         }
 
-        db.log_event(crate::core::db::EventType::GatePassed, Some("dev"), Some("auditor"),
+        let gate_event_id = db.log_event(crate::core::db::EventType::GatePassed, Some("dev"), Some("auditor"),
             Some(&format!("[Task {}] Diff aprovado", task.id)), Some(&patch_hash), false, None).await?;
+
+        // Escreve handoff no ai-memory e salva o "recibo" (URL) no evento
+        {
+            let wiki_path = format!("handoffs/run_{}/task_{}.md", &run_id[..8], &task.id[..8]);
+            let title = format!("[Dev] {} — {}", &task.id[..8], task.description);
+            let body = format!(
+                "# Dev Handoff\n\n**Task:** {}\n**Run:** {}\n**Arquivos:** {}\n**Riscos:** {}\n\n## Diff\n```diff\n{}\n```",
+                task.description, run_id,
+                parsed_diff.files_modified.join(", "),
+                dev_response.risks.join(", "),
+                if parsed_diff.raw.len() > 2000 { format!("{}...", &parsed_diff.raw[..2000]) } else { parsed_diff.raw.clone() }
+            );
+            if let Some(url) = crate::core::memory::write_to_ai_memory(&wiki_path, &title, &body) {
+                db.update_event_memory_url(gate_event_id, &url).await.ok();
+                send(format!("🔗 Handoff registrado: {}", url));
+            }
+        }
 
         // Gate: aplicar patch
         send_gate(

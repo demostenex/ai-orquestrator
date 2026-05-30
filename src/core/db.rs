@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS events (
     content_hash TEXT,
     enriched_by_human INTEGER DEFAULT 0,
     human_notes  TEXT,
+    memory_url   TEXT,               -- path/URL da página no ai-memory (se existir)
     timestamp    TEXT NOT NULL
 );
 
@@ -187,6 +188,7 @@ pub struct EventRow {
     pub content_summary: Option<String>,
     pub enriched_by_human: bool,
     pub human_notes: Option<String>,
+    pub memory_url: Option<String>,
     pub timestamp: String,
 }
 
@@ -236,6 +238,8 @@ impl Db {
 
         let conn = pool.get()?;
         conn.execute_batch(SCHEMA)?;
+        // Migração: adiciona memory_url a bancos existentes (ignorado se já existir)
+        let _ = conn.execute("ALTER TABLE events ADD COLUMN memory_url TEXT", []);
 
         let workspace_str = workspace_path.to_string_lossy().to_string();
         let project_id = compute_sha256(&workspace_str);
@@ -276,7 +280,7 @@ impl Db {
         })
     }
 
-    /// Registra um evento na fila ordenada do run.
+    /// Registra um evento na fila ordenada do run. Retorna o id do evento inserido.
     pub async fn log_event(
         &self,
         event_type: EventType,
@@ -286,7 +290,7 @@ impl Db {
         content_hash: Option<&str>,
         enriched_by_human: bool,
         human_notes: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<i64> {
         let pool = self.pool.clone();
         let pid = self.project_id.clone();
         let rid = self.run_id.clone();
@@ -312,7 +316,7 @@ impl Db {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![pid, rid, sequence, etype, from, to, summary, hash, enriched_by_human as i64, notes, now],
             )?;
-            Ok(())
+            Ok(conn.last_insert_rowid())
         }).await?
     }
 
@@ -685,7 +689,7 @@ impl Db {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
                 "SELECT id, run_id, sequence, event_type, from_agent, to_agent,
-                        content_summary, enriched_by_human, human_notes, timestamp
+                        content_summary, enriched_by_human, human_notes, memory_url, timestamp
                  FROM events WHERE run_id = ?1 ORDER BY sequence ASC",
             )?;
             let rows = stmt.query_map(params![rid], |row| {
@@ -699,7 +703,8 @@ impl Db {
                     content_summary: row.get(6)?,
                     enriched_by_human: row.get::<_, i64>(7)? != 0,
                     human_notes: row.get(8)?,
-                    timestamp: row.get(9)?,
+                    memory_url: row.get(9)?,
+                    timestamp: row.get(10)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -755,7 +760,7 @@ impl Db {
             let conn = rusqlite::Connection::open(&db_path)?;
             let mut stmt = conn.prepare(
                 "SELECT id, run_id, sequence, event_type, from_agent, to_agent,
-                        content_summary, enriched_by_human, human_notes, timestamp
+                        content_summary, enriched_by_human, human_notes, memory_url, timestamp
                  FROM events WHERE run_id = ?1 ORDER BY sequence ASC",
             )?;
             let rows = stmt.query_map(params![run_id], |row| {
@@ -769,7 +774,8 @@ impl Db {
                     content_summary: row.get(6)?,
                     enriched_by_human: row.get::<_, i64>(7)? != 0,
                     human_notes: row.get(8)?,
-                    timestamp: row.get(9)?,
+                    memory_url: row.get(9)?,
+                    timestamp: row.get(10)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -782,6 +788,20 @@ impl Db {
 
     pub fn project_id(&self) -> &str {
         &self.project_id
+    }
+
+    /// Atualiza a URL do ai-memory para um evento específico (receipt de escrita).
+    pub async fn update_event_memory_url(&self, event_id: i64, memory_url: &str) -> Result<()> {
+        let pool = self.pool.clone();
+        let url = memory_url.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            conn.execute(
+                "UPDATE events SET memory_url = ?1 WHERE id = ?2",
+                params![url, event_id],
+            )?;
+            Ok(())
+        }).await?
     }
 
     /// Resumo do projeto para a Home Screen (Fase 5).
@@ -865,7 +885,7 @@ impl Db {
 
             let mut stmt = conn.prepare(
                 "SELECT e.id, e.run_id, e.sequence, e.event_type, e.from_agent, e.to_agent,
-                        e.content_summary, e.enriched_by_human, e.human_notes, e.timestamp
+                        e.content_summary, e.enriched_by_human, e.human_notes, e.memory_url, e.timestamp
                  FROM events e
                  JOIN plans p ON e.run_id = p.run_id
                  WHERE p.id = ?1
@@ -884,7 +904,8 @@ impl Db {
                     content_summary: row.get(6)?,
                     enriched_by_human: row.get::<_, i64>(7)? != 0,
                     human_notes: row.get(8)?,
-                    timestamp: row.get(9)?,
+                    memory_url: row.get(9)?,
+                    timestamp: row.get(10)?,
                 })
             })?;
 

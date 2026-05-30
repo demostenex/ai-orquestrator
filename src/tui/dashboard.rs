@@ -87,7 +87,9 @@ pub fn handle_key(key: KeyEvent, ui: &mut DashboardUiState, ds: &DashboardState)
             if let Some(selected) = ui.list_state.selected() {
                 let len = ds.recent_events.len();
                 if let Some(ev) = ds.recent_events.get(len.saturating_sub(1 + selected)) {
-                    return DashboardCmd::LoadMemory(ev.run_id.clone());
+                    // Prioriza memory_url; fallback para busca por run_id
+                    let target = ev.memory_url.clone().unwrap_or_else(|| ev.run_id.clone());
+                    return DashboardCmd::LoadMemory(target);
                 }
             }
             DashboardCmd::None
@@ -176,11 +178,13 @@ fn render_audit_feed(f: &mut Frame, ds: &DashboardState, ui: &mut DashboardUiSta
                 s if s.contains("response") || s.contains("prompt") => Color::Cyan,
                 _ => Color::Gray,
             };
+            let link_icon = if ev.memory_url.is_some() { " 🔗" } else { "" };
             let text = format!(
-                "[{}] {} → {}",
+                "[{}] {} → {}{}",
                 &ev.timestamp[..16],
                 ev.from_agent.as_deref().unwrap_or("-"),
                 ev.content_summary.as_deref().unwrap_or(""),
+                link_icon,
             );
             ListItem::new(text).style(Style::default().fg(color))
         })
@@ -258,9 +262,15 @@ pub fn compute_progress(tasks: &[Task]) -> String {
     format!("[{}] {}% ({}/{})", bar, pct, completed, total)
 }
 
-/// Invoca o ai-memory CLI para ler o handoff associado a um run_id.
-pub fn load_memory_for_run(run_id: &str) -> String {
-    let direct_path = format!("handoffs/run_{}.md", run_id);
+/// Invoca o ai-memory CLI para ler a página de um evento.
+/// `target` pode ser um memory_url (path direto) ou um run_id (para busca por heurística).
+pub fn load_memory_for_run(target: &str) -> String {
+    // Se parece um path de wiki (contém '/'), usa como path direto
+    let direct_path = if target.contains('/') {
+        target.to_string()
+    } else {
+        format!("handoffs/run_{}.md", target)
+    };
 
     if let Ok(output) = std::process::Command::new("ai-memory")
         .args(["read-page", "--path", &direct_path])
@@ -269,25 +279,25 @@ pub fn load_memory_for_run(run_id: &str) -> String {
         if output.status.success() {
             let body = String::from_utf8_lossy(&output.stdout).to_string();
             if !body.trim().is_empty() {
-                return format!("📄 Handoff do run {}\n\n{}", run_id, body);
+                return format!("📄 {}\n\n{}", direct_path, body);
             }
         }
     }
 
     if let Ok(output) = std::process::Command::new("ai-memory")
-        .args(["read-page", run_id])
+        .args(["read-page", target])
         .output()
     {
         if output.status.success() {
             let body = String::from_utf8_lossy(&output.stdout).to_string();
             if !body.trim().is_empty() {
-                return format!("🔍 Busca por run_id {}\n\n{}", run_id, body);
+                return format!("🔍 Busca: {}\n\n{}", target, body);
             }
         }
     }
 
     format!(
-        "Nenhuma página encontrada\npara o run_id:\n{}\n\n(handoffs são registrados\nvia write-page em cada ciclo)",
-        run_id
+        "Nenhuma página encontrada\npara:\n{}\n\n(handoffs são registrados\nvia write-page em cada ciclo)",
+        target
     )
 }

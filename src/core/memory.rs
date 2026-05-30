@@ -91,6 +91,37 @@ pub fn sync_handoff_summary(orchestrator_dir: &Path, run_id: &str, handoff: &Han
     Ok(memory_hash)
 }
 
+/// Escreve uma página no ai-memory via CLI e retorna o path da página criada (o "recibo").
+/// Retorna None se o CLI não estiver disponível ou falhar.
+pub fn write_to_ai_memory(wiki_path: &str, title: &str, body: &str) -> Option<String> {
+    use std::io::Write as _;
+
+    let mut child = std::process::Command::new("ai-memory")
+        .args(["write-page", "--path", wiki_path, "--title", title])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(body.as_bytes());
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() { return None; }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    // Tenta extrair "path" do JSON retornado pelo CLI
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        if let Some(path) = val.get("path").and_then(|p| p.as_str()) {
+            return Some(path.to_string());
+        }
+    }
+    let trimmed = stdout.trim().to_string();
+    if trimmed.is_empty() { None } else { Some(trimmed) }
+}
+
 pub fn load_last_sync(orchestrator_dir: &Path) -> Result<LastSyncState> {
     let sync_path = orchestrator_dir.join("memory-sync").join("last-sync.json");
     if !sync_path.exists() {
