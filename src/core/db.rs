@@ -502,6 +502,23 @@ impl Db {
         }).await?
     }
 
+    pub async fn list_plans(&self) -> Result<Vec<crate::schemas::PlanSummary>> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT id, title FROM plans ORDER BY created_at DESC"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(crate::schemas::PlanSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).await?
+    }
+
     pub async fn get_plan_tasks(&self, plan_id: &str) -> Result<Vec<crate::schemas::Task>> {
         let pool = self.pool.clone();
         let plid = plan_id.to_string();

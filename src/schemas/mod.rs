@@ -37,6 +37,12 @@ pub struct PlanTurn {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanSummary {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DevResponse {
     pub step_id: String,
     pub summary: String,

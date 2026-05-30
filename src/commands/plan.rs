@@ -5,7 +5,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::cli::PlanCommands;
-use crate::commands::{export_plan_to_markdown, interactive_gate, interactive_plan_gate, print_success};
+use crate::commands::{export_plan_to_markdown, interactive_gate, interactive_plan_gate, print_success, print_warning};
 use crate::core::cli_runner::run_cli;
 use crate::core::config::Config;
 use crate::core::db::Db;
@@ -16,6 +16,9 @@ pub async fn execute(command: PlanCommands) -> Result<()> {
     match command {
         PlanCommands::New { title } => new_plan(title).await,
         PlanCommands::Finalize { plan_id } => finalize_plan(plan_id).await,
+        PlanCommands::Continue { plan_id, cli1, cli2, max_turns } => {
+            continue_plan(plan_id, cli1, cli2, max_turns).await
+        }
     }
 }
 
@@ -261,6 +264,110 @@ pub async fn finalize_plan(plan_id: String) -> Result<()> {
     println!("  Arquivo gerado  : {}", config.orchestrator_dir.join("plan.md").display().to_string().cyan());
     println!();
     println!("O todo list agora está bloqueado para edição por agentes que não sejam 'dev'.");
+
+    // Sync com ai-memory (best effort — não aborta se falhar)
+    let summary = format!(
+        "# Plano Finalizado\n\n**ID:** {}\n**Título:** {}\n**Tarefas:** {}\n**Data:** {}\n",
+        plan_id,
+        title,
+        tasks.len(),
+        chrono::Utc::now().to_rfc3339()
+    );
+
+    if let Err(e) = std::process::Command::new("ai-memory")
+        .args([
+            "write-page",
+            "--path",
+            &format!("decisions/plan_{}.md", plan_id),
+            "--body",
+            &summary,
+        ])
+        .output()
+    {
+        print_warning(&format!("Não foi possível sincronizar com ai-memory: {}", e));
+    }
+
+    Ok(())
+}
+
+async fn continue_plan(
+    plan_id: Option<String>,
+    cli1: String,
+    cli2: Option<String>,
+    max_turns: usize,
+) -> Result<()> {
+    let config = Config::load()?;
+
+    // 1. Resolver plan_id (se None → seletor interativo)
+    let plan_id = match plan_id {
+        Some(id) => id,
+        None => {
+            let db = Db::open(
+                &config.orchestrator_dir,
+                &config.workspace_dir,
+                &Uuid::new_v4().to_string(),
+                &config.step_id,
+                "planning",
+                "HEAD",
+                "",
+                "",
+            )?;
+
+            let plans = db.list_plans().await?;
+            if plans.is_empty() {
+                return Err(anyhow!("Nenhum plano encontrado. Use 'ai-orchestrator plan new' primeiro."));
+            }
+
+            let options: Vec<String> = plans
+                .iter()
+                .map(|p| format!("{} — {}", p.id, p.title))
+                .collect();
+
+            let selection = tokio::task::spawn_blocking(move || {
+                inquire::Select::new("Selecione o plano para continuar:", options)
+                    .prompt()
+            })
+            .await??;
+
+            selection
+                .split(" — ")
+                .next()
+                .ok_or_else(|| anyhow!("Seleção inválida"))?
+                .to_string()
+        }
+    };
+
+    // 2. Monta a lista de agentes
+    let agents: Vec<(&str, &str, &str)> = if let Some(cli_dev) = &cli2 {
+        vec![
+            ("architect", "Arquiteto", cli1.as_str()),
+            ("dev", "Dev", cli_dev.as_str()),
+        ]
+    } else {
+        vec![("architect", "Arquiteto", cli1.as_str())]
+    };
+
+    // 3. Abre o DB para o loop
+    let db = Db::open(
+        &config.orchestrator_dir,
+        &config.workspace_dir,
+        &Uuid::new_v4().to_string(),
+        &config.step_id,
+        "planning",
+        "HEAD",
+        "",
+        "",
+    )?;
+
+    // 4. Executa o loop de planejamento
+    run_planning_loop(
+        &db,
+        &config.orchestrator_dir,
+        &plan_id,
+        &agents,
+        max_turns,
+    )
+    .await?;
 
     Ok(())
 }

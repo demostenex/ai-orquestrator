@@ -86,6 +86,17 @@ pub enum PlanCommands {
         #[arg(short, long, help = "ID do plano a ser finalizado")]
         plan_id: String,
     },
+    #[command(about = "Continua uma sessão de planejamento interativo")]
+    Continue {
+        #[arg(short, long, help = "ID do plano (se omitido, abre seletor interativo)")]
+        plan_id: Option<String>,
+        #[arg(long, help = "CLI para o agente Arquiteto (obrigatório)")]
+        cli1: String,
+        #[arg(long, help = "CLI para o agente Dev (opcional; se ausente usa cli1)")]
+        cli2: Option<String>,
+        #[arg(long, default_value_t = 10, help = "Número máximo de turnos")]
+        max_turns: usize,
+    },
 }
 
 pub async fn run() -> Result<()> {
