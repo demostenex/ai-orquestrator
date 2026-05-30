@@ -786,31 +786,55 @@ struct MemoryPageInfo {
     title: String,
 }
 
-/// Lista todas as páginas do ai-memory via CLI.
+/// Lista todas as páginas do ai-memory via `search` CLI.
+/// O CLI retorna texto no formato:
+///   `  <path>  rank=<float>\n    <title>\n    <snippet>...`
+/// Usa múltiplas queries comuns para maximizar cobertura.
 fn list_ai_memory_pages() -> Vec<MemoryPageInfo> {
-    for args in [
-        vec!["list"],
-        vec!["pages"],
-        vec!["recent", "--limit", "200"],
-    ] {
-        let Ok(output) = std::process::Command::new("ai-memory").args(&args).output() else { continue };
-        if !output.status.success() { continue }
+    let mut seen = std::collections::HashSet::new();
+    let mut pages = Vec::new();
+
+    // Queries amplas para capturar a maioria das páginas
+    for query in ["e", "a", "o", "i"] {
+        let Ok(output) = std::process::Command::new("ai-memory")
+            .args(["search", query, "--limit", "500"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+        else { continue };
+
         let text = String::from_utf8_lossy(&output.stdout);
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-        let arr = val.as_array()
-            .or_else(|| val.get("hits").and_then(|h| h.as_array()))
-            .or_else(|| val.get("pages").and_then(|p| p.as_array()));
-        if let Some(arr) = arr {
-            let pages: Vec<MemoryPageInfo> = arr.iter().filter_map(|item| {
-                let path = item.get("path")?.as_str()?.to_string();
-                let title = item.get("title").and_then(|t| t.as_str())
-                    .unwrap_or(&path).to_string();
-                Some(MemoryPageInfo { path, title })
-            }).collect();
-            if !pages.is_empty() { return pages; }
+        let mut last_path: Option<String> = None;
+
+        for line in text.lines() {
+            // Path line: "  <path>  rank=<float>" (exactly 2 leading spaces, contains rank=)
+            let stripped = line.strip_prefix("  ").unwrap_or("");
+            if stripped.starts_with("  ") || stripped.is_empty() {
+                // Title line (4 spaces) or blank — capture title for last path
+                if let Some(ref p) = last_path {
+                    if !stripped.trim().is_empty() && !stripped.contains('<') {
+                        let title = stripped.trim().to_string();
+                        if seen.insert(p.clone()) {
+                            pages.push(MemoryPageInfo { path: p.clone(), title });
+                        }
+                        last_path = None;
+                    }
+                }
+                continue;
+            }
+            // Check if this looks like a path line
+            if let Some(path_part) = stripped.split("  rank=").next() {
+                let path = path_part.trim().to_string();
+                if path.contains('/') && path.ends_with(".md") {
+                    last_path = Some(path);
+                    continue;
+                }
+            }
+            last_path = None;
         }
     }
-    vec![]
+
+    pages
 }
 
 /// Extrai event_type e run_id a partir do path da página wiki.

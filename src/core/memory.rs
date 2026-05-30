@@ -97,7 +97,7 @@ pub fn write_to_ai_memory(wiki_path: &str, title: &str, body: &str) -> Option<St
     use std::io::Write as _;
 
     let mut child = std::process::Command::new("ai-memory")
-        .args(["write-page", "--path", wiki_path, "--title", title])
+        .args(["write-page", "--path", wiki_path, "--title", title, "--body", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
