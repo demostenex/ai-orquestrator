@@ -73,7 +73,7 @@ fn resolve_agent_mode(saved_cli: Option<&str>, role: &str) -> Result<AgentMode> 
     }
 }
 
-pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan: bool) -> Result<()> {
+pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan: bool, plan_id: Option<String>) -> Result<()> {
     let mut config = Config::load()?;
     let step_id = step.unwrap_or_else(|| config.step_id.clone());
 
@@ -81,6 +81,34 @@ pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan
         return Err(anyhow!(
             "working tree is dirty. Commit or stash your changes before running `ai-orchestrator run`."
         ));
+    }
+
+    // ── Passo 5.1: Suporte a --plan <id> + reset de tarefas presas em in_progress ──
+    if let Some(ref pid) = plan_id {
+        let temp_run_id = Uuid::new_v4().to_string();
+        let temp_db = Db::open(
+            &config.orchestrator_dir,
+            &config.workspace_dir,
+            &temp_run_id,
+            &config.step_id,
+            "plan-mode",
+            "HEAD",
+            "",
+            "",
+        )?;
+
+        let reset_count = temp_db.reset_in_progress_tasks(pid).await?;
+        if reset_count > 0 {
+            print_warning(&format!(
+                "Resetadas {} tarefa(s) presas em 'in_progress' para 'pending' (D2 do Passo 5).",
+                reset_count
+            ));
+        }
+
+        if let Ok(title) = temp_db.get_plan_title(pid).await {
+            let task_count = temp_db.get_plan_tasks(pid).await.map(|t| t.len()).unwrap_or(0);
+            print_step(&format!("Modo Dev com plano: {} ({} tarefas)", title.cyan(), task_count));
+        }
     }
 
     let plan_path = config.orchestrator_dir.join("plan.md");
@@ -129,6 +157,9 @@ pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan
         println!("Plan hash   : {plan_hash}");
         println!("Memory hash : {memory_hash}");
         println!("Step        : {step_id}");
+        if let Some(ref pid) = plan_id {
+            println!("Plan ID     : {pid}");
+        }
         return Ok(());
     }
 
