@@ -51,14 +51,19 @@ impl HomeState {
 
 // ── Render (puro — sem loop, sem raw mode) ────────────────────────────────────
 
-pub fn render(f: &mut Frame, state: &mut HomeState, summary: &ProjectSummary, area: Rect) {
+pub fn render(f: &mut Frame, state: &mut HomeState, summary: &ProjectSummary, memory: &str, area: Rect) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .constraints([
+            Constraint::Percentage(25), // Menu
+            Constraint::Percentage(45), // Status do Projeto
+            Constraint::Percentage(30), // AI-Memory Feed
+        ])
         .split(area);
 
     render_menu(f, state, columns[0]);
     render_status(f, state, summary, columns[1]);
+    render_memory(f, memory, columns[2]);
 }
 
 fn render_menu(f: &mut Frame, state: &mut HomeState, area: Rect) {
@@ -140,4 +145,28 @@ fn render_status(f: &mut Frame, state: &mut HomeState, summary: &ProjectSummary,
         .wrap(Wrap { trim: true });
 
     f.render_widget(status, area);
+}
+
+fn render_memory(f: &mut Frame, memory: &str, area: Rect) {
+    let display = if memory.trim().is_empty() {
+        "Nenhuma nota carregada.\n\nPressione 'r' na Home para recarregar.".to_string()
+    } else {
+        memory.to_string()
+    };
+
+    let panel = Paragraph::new(display.as_str())
+        .style(Style::default().fg(Color::White))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray))
+                .title(Span::styled(
+                    " AI-Memory ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))
+                .title_alignment(Alignment::Center),
+        )
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(panel, area);
 }

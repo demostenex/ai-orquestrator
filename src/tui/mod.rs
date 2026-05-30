@@ -148,6 +148,7 @@ struct TuiApp {
     dash_ui: DashboardUiState,
     plans: Vec<PlanSummary>,
     summary: ProjectSummary,
+    home_memory: String,
     orchestrator_dir: PathBuf,
     exec: ExecState,
     log_rx: Option<crate::core::stream::LogRx>,
@@ -155,7 +156,7 @@ struct TuiApp {
 }
 
 impl TuiApp {
-    fn new(orchestrator_dir: PathBuf, summary: ProjectSummary, plans: Vec<PlanSummary>) -> Self {
+    fn new(orchestrator_dir: PathBuf, summary: ProjectSummary, plans: Vec<PlanSummary>, home_memory: String) -> Self {
         let selector = SelectorState::new(plans.len());
         Self {
             view: AppView::Home,
@@ -166,6 +167,7 @@ impl TuiApp {
             dash_ui: DashboardUiState::new(0),
             plans,
             summary,
+            home_memory,
             orchestrator_dir,
             exec: ExecState::new(String::new()),
             log_rx: None,
@@ -182,8 +184,9 @@ pub async fn start() -> Result<()> {
 
     let summary = Db::get_home_summary(orchestrator_dir.clone()).await.unwrap_or_default();
     let plans = load_plans(&orchestrator_dir).await;
+    let home_memory = load_ai_memory_feed();
 
-    let mut app = TuiApp::new(orchestrator_dir.clone(), summary, plans);
+    let mut app = TuiApp::new(orchestrator_dir.clone(), summary, plans, home_memory);
 
     // Setup terminal — único ponto de enable/disable em toda a sessão
     enable_raw_mode()?;
@@ -240,6 +243,7 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                             app.gate_tx = None;
                             app.summary = Db::get_home_summary(app.orchestrator_dir.clone()).await.unwrap_or_default();
                             app.plans = load_plans(&app.orchestrator_dir).await;
+                            app.home_memory = load_ai_memory_feed();
                             app.view = AppView::Home;
                             break;
                         }
@@ -370,6 +374,10 @@ fn dispatch_key(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
 fn dispatch_home(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
     match key {
         KeyCode::Char('q') | KeyCode::Esc => LoopCmd::Quit,
+        KeyCode::Char('r') => {
+            app.home_memory = load_ai_memory_feed();
+            LoopCmd::Continue
+        }
         KeyCode::Up => { app.home.move_up(); LoopCmd::Continue }
         KeyCode::Down => { app.home.move_down(); LoopCmd::Continue }
         KeyCode::Enter | KeyCode::Char('1'..='5') => {
@@ -517,7 +525,7 @@ fn render_app(f: &mut Frame<'_>, app: &mut TuiApp) {
     render_banner(f, chunks[0]);
 
     match &app.view {
-        AppView::Home => home::render(f, &mut app.home, &app.summary, chunks[1]),
+        AppView::Home => home::render(f, &mut app.home, &app.summary, &app.home_memory, chunks[1]),
         AppView::Selector(ctx) => {
             let label = match ctx {
                 SelectorCtx::ForDashboard => "Selecionar plano para abrir no Dashboard",
@@ -677,7 +685,7 @@ fn render_gate(f: &mut Frame, exec: &ExecState, area: Rect) {
 fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
     let text = match view {
         AppView::Home =>
-            "  ↑↓: Navegar   Enter: Executar   1-5: Atalho direto   q: Sair",
+            "  ↑↓: Navegar   Enter: Executar   1-5: Atalho   r: Recarregar Memória   q: Sair",
         AppView::Selector(_) =>
             "  ↑↓: Navegar   Enter: Selecionar   q/Esc: Voltar ao Menu",
         AppView::Dashboard =>
@@ -707,6 +715,28 @@ async fn load_plans(orchestrator_dir: &PathBuf) -> Vec<PlanSummary> {
         return vec![];
     };
     db.list_plans().await.unwrap_or_default()
+}
+
+/// Carrega as notas e páginas recentes do ai-memory via CLI.
+fn load_ai_memory_feed() -> String {
+    // Tenta buscar as páginas mais recentes
+    for args in [
+        vec!["recent", "--limit", "5"],
+        vec!["recent"],
+        vec!["list", "--recent"],
+    ] {
+        if let Ok(output) = std::process::Command::new("ai-memory").args(&args).output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).to_string();
+                if !text.trim().is_empty() {
+                    // Limita a 40 linhas para caber no painel
+                    let trimmed: String = text.lines().take(40).collect::<Vec<_>>().join("\n");
+                    return trimmed;
+                }
+            }
+        }
+    }
+    "── Feed de Conhecimento ──\n\nai-memory não disponível\nou sem páginas recentes.\n\nPressione 'r' para tentar novamente.".to_string()
 }
 
 /// Cria um novo plano diretamente via DB, sem sair do raw mode.
