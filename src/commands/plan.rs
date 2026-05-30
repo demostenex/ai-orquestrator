@@ -1,11 +1,14 @@
 use anyhow::{anyhow, Result};
+use chrono::Utc;
 use colored::Colorize;
 use uuid::Uuid;
 
 use crate::cli::PlanCommands;
 use crate::commands::{export_plan_to_markdown, print_success};
+use crate::core::cli_runner::run_cli;
 use crate::core::config::Config;
 use crate::core::db::Db;
+use crate::schemas::PlanTurn;
 
 /// Ponto de entrada para o subcomando `plan`.
 pub async fn execute(command: PlanCommands) -> Result<()> {
@@ -102,4 +105,47 @@ pub fn build_planning_prompt(turns: &[crate::schemas::PlanTurn], role: &str) -> 
     prompt.push_str("- Mantenha o foco no planejamento de alto nível (arquitetura, tarefas, decisões).\n\n");
 
     prompt
+}
+
+/// Executa um turno completo de planejamento:
+/// 1. Busca turnos anteriores
+/// 2. Monta o prompt via build_planning_prompt
+/// 3. Chama o CLI (via run_cli simples)
+/// 4. Persiste o resultado via add_plan_turn
+/// Retorna o PlanTurn recém-criado.
+pub async fn run_planning_turn(
+    db: &Db,
+    plan_id: &str,
+    agent: &str,
+    role: &str,
+    cli_name: &str,
+) -> Result<PlanTurn> {
+    // 1. Buscar histórico de turnos
+    let turns = db.get_plan_turns(plan_id).await?;
+
+    // 2. Construir o prompt para este turno
+    let prompt = build_planning_prompt(&turns, role);
+
+    // 3. Executar o CLI (run_cli é síncrono → spawn_blocking)
+    let content = tokio::task::spawn_blocking({
+        let cli = cli_name.to_string();
+        let p = prompt.clone();
+        move || run_cli(&cli, &p)
+    })
+    .await??;
+
+    // 4. Persistir o turno no banco
+    db.add_plan_turn(plan_id, agent, &prompt, &content).await?;
+
+    // 5. Retornar o turno criado
+    let now = Utc::now().to_rfc3339();
+    let sequence = (turns.len() as i64) + 1;
+
+    Ok(PlanTurn {
+        sequence,
+        agent: agent.to_string(),
+        prompt,
+        content,
+        timestamp: now,
+    })
 }
