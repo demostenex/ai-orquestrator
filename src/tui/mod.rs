@@ -4,11 +4,9 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use inquire::Text;
-use ratatui::{backend::CrosstermBackend, prelude::*, widgets::{Block, Borders, Paragraph}};
+use ratatui::{backend::CrosstermBackend, prelude::*, widgets::{Block, Borders, Paragraph, Wrap}};
 use std::io;
 use std::path::PathBuf;
-use tokio::task;
 
 pub mod dashboard;
 pub mod home;
@@ -27,6 +25,7 @@ enum AppView {
     Home,
     Selector(SelectorCtx),
     Dashboard,
+    Prompt(PromptState),
 }
 
 #[derive(Clone)]
@@ -36,11 +35,53 @@ enum SelectorCtx {
     ForDev,
 }
 
-// Ações que precisam suspender o Ratatui para usar inquire
+// Ações que precisam suspender o Ratatui (executar comando externo com output)
 enum Suspend {
     NewPlan,
-    ContinuePlanning { plan_id: String },
+    ContinuePlanning { plan_id: String, cli1: String, cli2: Option<String>, max_turns: usize },
     ExecuteDev { plan_id: String },
+}
+
+// ── Prompt: coleta de campos dentro do TUI ────────────────────────────────────
+
+struct PromptField {
+    label: &'static str,
+    optional: bool,
+    default: Option<&'static str>,
+}
+
+enum PromptNext {
+    ContinuePlanning { plan_id: String },
+}
+
+struct PromptState {
+    title: &'static str,
+    fields: Vec<PromptField>,
+    current: usize,
+    buffer: String,
+    collected: Vec<String>,
+    next: PromptNext,
+}
+
+impl PromptState {
+    fn for_continue(plan_id: String) -> Self {
+        Self {
+            title: "Continuar Planejamento",
+            fields: vec![
+                PromptField { label: "CLI para o Arquiteto (ex: claude, gemini)", optional: false, default: None },
+                PromptField { label: "CLI para o Dev (vazio = mesmo que Arquiteto)", optional: true, default: None },
+                PromptField { label: "Máximo de turnos", optional: false, default: Some("10") },
+            ],
+            current: 0,
+            buffer: String::new(),
+            collected: Vec::new(),
+            next: PromptNext::ContinuePlanning { plan_id },
+        }
+    }
+
+    fn progress(&self) -> String {
+        format!("{}/{}", self.current + 1, self.fields.len())
+    }
 }
 
 // ── App State ─────────────────────────────────────────────────────────────────
@@ -166,6 +207,7 @@ fn dispatch_key(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
         AppView::Home => dispatch_home(app, key),
         AppView::Selector(_) => dispatch_selector(app, key),
         AppView::Dashboard => dispatch_dashboard(app, key),
+        AppView::Prompt(_) => dispatch_prompt(app, key),
     }
 }
 
@@ -216,7 +258,7 @@ fn dispatch_selector(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
             let ctx = app.selector_ctx.clone();
             match ctx {
                 SelectorCtx::ForDashboard => LoopCmd::LoadDashboard(plan_id),
-                SelectorCtx::ForContinue => LoopCmd::Suspend(Suspend::ContinuePlanning { plan_id }),
+                SelectorCtx::ForContinue => LoopCmd::GoTo(AppView::Prompt(PromptState::for_continue(plan_id))),
                 SelectorCtx::ForDev => LoopCmd::Suspend(Suspend::ExecuteDev { plan_id }),
             }
         }
@@ -232,6 +274,43 @@ fn dispatch_dashboard(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
         DashboardCmd::Back => LoopCmd::GoTo(AppView::Home),
         DashboardCmd::Reload => LoopCmd::ReloadDashboard,
         DashboardCmd::LoadMemory(run_id) => LoopCmd::LoadMemory(run_id),
+    }
+}
+
+fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
+    let AppView::Prompt(ref mut ps) = app.view else { return LoopCmd::Continue };
+    match key {
+        KeyCode::Esc => return LoopCmd::GoTo(AppView::Home),
+        KeyCode::Backspace => { ps.buffer.pop(); return LoopCmd::Continue; }
+        KeyCode::Char(c) => { ps.buffer.push(c); return LoopCmd::Continue; }
+        KeyCode::Enter => {
+            // Aplica default se buffer vazio e campo tem default
+            if ps.buffer.is_empty() {
+                if let Some(def) = ps.fields[ps.current].default {
+                    ps.buffer = def.to_string();
+                }
+            }
+            ps.collected.push(ps.buffer.clone());
+            ps.buffer.clear();
+            ps.current += 1;
+
+            if ps.current < ps.fields.len() {
+                return LoopCmd::Continue; // mais campos a coletar
+            }
+
+            // Todos os campos coletados — constrói o Suspend
+            let collected = ps.collected.clone();
+            match &ps.next {
+                PromptNext::ContinuePlanning { plan_id } => {
+                    let plan_id = plan_id.clone();
+                    let cli1 = collected[0].clone();
+                    let cli2 = if collected[1].is_empty() { None } else { Some(collected[1].clone()) };
+                    let max_turns: usize = collected[2].parse().unwrap_or(10);
+                    LoopCmd::Suspend(Suspend::ContinuePlanning { plan_id, cli1, cli2, max_turns })
+                }
+            }
+        }
+        _ => LoopCmd::Continue,
     }
 }
 
@@ -264,6 +343,7 @@ fn render_app(f: &mut Frame<'_>, app: &mut TuiApp) {
         AppView::Dashboard => {
             dashboard::render_body(f, &app.dash_data, &mut app.dash_ui, chunks[1]);
         }
+        AppView::Prompt(ps) => render_prompt(f, ps, chunks[1]),
     }
 
     render_footer(f, &app.view, chunks[2]);
@@ -298,6 +378,56 @@ fn render_banner(f: &mut Frame, area: Rect) {
     f.render_widget(banner, area);
 }
 
+fn render_prompt(f: &mut Frame, ps: &PromptState, area: Rect) {
+    let mut lines: Vec<Line> = vec![Line::from("")];
+
+    // Campos já coletados (verde)
+    for (i, field) in ps.fields[..ps.current].iter().enumerate() {
+        let val = &ps.collected[i];
+        let display = if val.is_empty() { "(padrão)".to_string() } else { val.clone() };
+        lines.push(Line::from(vec![
+            Span::styled("  ✓ ", Style::default().fg(Color::Green)),
+            Span::styled(field.label, Style::default().fg(Color::Gray)),
+            Span::styled(format!(": {}", display), Style::default().fg(Color::Green)),
+        ]));
+    }
+
+    if ps.current < ps.fields.len() {
+        let field = &ps.fields[ps.current];
+        lines.push(Line::from(""));
+        // Label do campo atual
+        let suffix = if field.optional { " (opcional)" } else { "" };
+        let def_hint = field.default.map(|d| format!(" [padrão: {}]", d)).unwrap_or_default();
+        lines.push(Line::from(Span::styled(
+            format!("  ▶ {}{}{}", field.label, suffix, def_hint),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        // Buffer de input com cursor
+        lines.push(Line::from(vec![
+            Span::styled("    > ", Style::default().fg(Color::Cyan)),
+            Span::styled(ps.buffer.clone(), Style::default().fg(Color::White)),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]));
+    }
+
+    let text: Vec<&Line> = lines.iter().collect();
+    let content = Text::from(lines.clone());
+    let panel = Paragraph::new(content)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(
+                    format!(" {} ({}) ", ps.title, ps.progress()),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ))
+                .title_alignment(Alignment::Center),
+        )
+        .wrap(Wrap { trim: false });
+    let _ = text; // suprime warning
+    f.render_widget(panel, area);
+}
+
 fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
     let text = match view {
         AppView::Home =>
@@ -306,6 +436,8 @@ fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
             "  ↑↓: Navegar   Enter: Selecionar   q/Esc: Voltar ao Menu",
         AppView::Dashboard =>
             "  ↑↓: Feed   Enter: Carregar Handoff   r: Recarregar   q/Esc: Voltar",
+        AppView::Prompt(_) =>
+            "  Enter: Confirmar   Backspace: Apagar   Esc: Cancelar",
     };
     let footer = Paragraph::new(text)
         .style(Style::default().fg(Color::Gray))
@@ -333,8 +465,13 @@ async fn suspend_for_input(
         Suspend::NewPlan => {
             crate::commands::plan::execute(PlanCommands::New { title: None }).await?;
         }
-        Suspend::ContinuePlanning { plan_id } => {
-            handle_continue_planning(plan_id).await?;
+        Suspend::ContinuePlanning { plan_id, cli1, cli2, max_turns } => {
+            crate::commands::plan::execute(PlanCommands::Continue {
+                plan_id: Some(plan_id),
+                cli1,
+                cli2,
+                max_turns,
+            }).await?;
         }
         Suspend::ExecuteDev { plan_id } => {
             crate::commands::run::execute(None, false, false, false, Some(plan_id)).await?;
@@ -365,35 +502,3 @@ async fn load_plans(orchestrator_dir: &PathBuf) -> Vec<PlanSummary> {
     db.list_plans().await.unwrap_or_default()
 }
 
-async fn handle_continue_planning(plan_id: String) -> Result<()> {
-    let cli1 = task::spawn_blocking(|| {
-        Text::new("CLI para o Arquiteto (ex: claude, gemini):").prompt()
-    })
-    .await??;
-
-    let cli2 = task::spawn_blocking(|| {
-        Text::new("CLI para o Dev (vazio = mesmo que Arquiteto):")
-            .prompt()
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-    })
-    .await?;
-
-    let max_turns = task::spawn_blocking(|| {
-        Text::new("Número máximo de turnos:")
-            .with_default("10")
-            .prompt()
-            .unwrap_or_else(|_| "10".to_string())
-            .parse()
-            .unwrap_or(10usize)
-    })
-    .await?;
-
-    crate::commands::plan::execute(PlanCommands::Continue {
-        plan_id: Some(plan_id),
-        cli1,
-        cli2,
-        max_turns,
-    })
-    .await
-}
