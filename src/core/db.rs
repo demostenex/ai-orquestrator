@@ -166,6 +166,16 @@ impl EventType {
 
 // ── Structs de leitura ────────────────────────────────────────────────────────
 
+#[derive(Debug, Default)]
+pub struct ProjectSummary {
+    pub plans_count: usize,
+    pub last_plan_title: String,
+    pub last_plan_status: String,
+    pub tasks_completed: usize,
+    pub tasks_total: usize,
+    pub last_run_at: String,
+}
+
 #[derive(Debug)]
 pub struct EventRow {
     pub id: i64,
@@ -772,5 +782,113 @@ impl Db {
 
     pub fn project_id(&self) -> &str {
         &self.project_id
+    }
+
+    /// Resumo do projeto para a Home Screen (Fase 5).
+    /// Leitura somente — não requer project_id nem run_id.
+    pub async fn get_home_summary(orchestrator_dir: PathBuf) -> Result<ProjectSummary> {
+        tokio::task::spawn_blocking(move || {
+            let db_path = orchestrator_dir.join("history.db");
+            if !db_path.exists() {
+                return Ok(ProjectSummary::default());
+            }
+            let conn = rusqlite::Connection::open(&db_path)?;
+
+            let plans_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM plans", [], |r| r.get(0))
+                .unwrap_or(0);
+
+            let (last_plan_title, last_plan_status) = conn
+                .query_row(
+                    "SELECT title, status FROM plans ORDER BY created_at DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .unwrap_or_default();
+
+            let tasks_total: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+                .unwrap_or(0);
+
+            let tasks_completed: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tasks WHERE status = 'completed'", [], |r| r.get(0))
+                .unwrap_or(0);
+
+            let last_run_at = conn
+                .query_row(
+                    "SELECT created_at FROM runs ORDER BY created_at DESC LIMIT 1",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap_or_default();
+
+            Ok(ProjectSummary {
+                plans_count: plans_count as usize,
+                last_plan_title,
+                last_plan_status,
+                tasks_completed: tasks_completed as usize,
+                tasks_total: tasks_total as usize,
+                last_run_at,
+            })
+        })
+        .await?
+    }
+
+    /// Abre o banco de forma somente leitura (sem criar run ou projeto).
+    /// Útil para dashboards e consultas.
+    pub async fn open_readonly(orchestrator_dir: &std::path::Path) -> Result<Self> {
+        let db_path = orchestrator_dir.join("history.db");
+
+        let manager = SqliteConnectionManager::file(&db_path)
+            .with_init(|c| c.pragma_update(None, "journal_mode", "WAL"));
+
+        let pool = Pool::new(manager)?;
+
+        // Não inserimos projeto nem run aqui
+        Ok(Self {
+            pool,
+            project_id: String::new(),
+            run_id: String::new(),
+        })
+    }
+
+    /// Busca os eventos mais recentes associados a um plano.
+    /// Usa o run_id atualmente vinculado na tabela plans (abordagem pragmática V1).
+    pub async fn list_recent_events_for_plan(
+        orchestrator_dir: PathBuf,
+        plan_id: String,
+        limit: usize,
+    ) -> Result<Vec<EventRow>> {
+        tokio::task::spawn_blocking(move || {
+            let db_path = orchestrator_dir.join("history.db");
+            let conn = rusqlite::Connection::open(&db_path)?;
+
+            let mut stmt = conn.prepare(
+                "SELECT e.id, e.run_id, e.sequence, e.event_type, e.from_agent, e.to_agent,
+                        e.content_summary, e.enriched_by_human, e.human_notes, e.timestamp
+                 FROM events e
+                 JOIN plans p ON e.run_id = p.run_id
+                 WHERE p.id = ?1
+                 ORDER BY e.timestamp DESC
+                 LIMIT ?2"
+            )?;
+
+            let rows = stmt.query_map(params![plan_id, limit as i64], |row| {
+                Ok(EventRow {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    sequence: row.get(2)?,
+                    event_type: row.get(3)?,
+                    from_agent: row.get(4)?,
+                    to_agent: row.get(5)?,
+                    content_summary: row.get(6)?,
+                    enriched_by_human: row.get::<_, i64>(7)? != 0,
+                    human_notes: row.get(8)?,
+                    timestamp: row.get(9)?,
+                })
+            })?;
+
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).await?
     }
 }
