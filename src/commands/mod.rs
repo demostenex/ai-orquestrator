@@ -16,7 +16,7 @@ use colored::Colorize;
 use serde::Serialize;
 
 use crate::core::db::Db;
-use crate::schemas::CycleState;
+use crate::schemas::{CycleDecision, CycleResult, CycleState, Task};
 
 pub(crate) fn read_to_string(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read file {}", path.display()))
@@ -356,4 +356,115 @@ pub(crate) fn latest_patch_file(orchestrator_dir: &Path) -> Result<Option<PathBu
     }
 
     Ok(latest.map(|entry| entry.0))
+}
+
+/// Portão interativo entre tarefas no Modo Plano (--plan).
+///
+/// Deve ser chamado após cada execução de `run_dev_cycle`.
+/// Retorna a decisão do humano, que deve ter precedência sobre o `CycleDecision` técnico.
+pub async fn interactive_inter_task_gate(
+    current_task: Option<&Task>,
+    last_cycle: &CycleResult,
+) -> Result<CycleDecision> {
+    let sep = "══════════════════════════════════════════════════════════".bold();
+
+    println!("\n{sep}");
+    println!("{}", " 📋 PORTÃO INTER-TAREFA".bold().cyan());
+    println!("{}", " (Decisão humana entre tarefas do plano)".dimmed());
+    println!("{sep}");
+
+    // Contexto da tarefa atual
+    if let Some(task) = current_task {
+        println!("Tarefa atual: {}", task.description.trim().cyan());
+        println!("ID: {}", task.id);
+    }
+
+    // Resultado do último ciclo
+    let status = if last_cycle.approved {
+        "APROVADO".green().bold()
+    } else {
+        "REPROVADO".red().bold()
+    };
+
+    println!(
+        "Resultado do ciclo: {} (aplicado: {})",
+        status,
+        if last_cycle.applied { "sim" } else { "não" }
+    );
+
+    if !last_cycle.summary.is_empty() {
+        println!("Resumo: {}", last_cycle.summary);
+    }
+
+    if last_cycle.approved {
+        println!("Status: {}", "Ciclo aprovado pela Auditora".green());
+    } else {
+        println!("Status: {}", "Ciclo reprovado pela Auditora".red());
+    }
+
+    println!("{sep}");
+
+    let default_avancar = last_cycle.approved;
+
+    let options = vec![
+        "Avançar para próxima tarefa ✅",
+        "Repetir esta tarefa 🔄",
+        "Enriquecer e Repetir ✏️",
+        "Abortar plano ❌",
+    ];
+
+    let default_index = if default_avancar { 0 } else { 1 };
+
+    let selection = tokio::task::spawn_blocking(move || {
+        inquire::Select::new("O que deseja fazer?", options)
+            .with_starting_cursor(default_index)
+            .with_help_message("Use as setas ↑↓ e Enter para confirmar")
+            .prompt()
+    })
+    .await??;
+
+    match selection {
+        "Avançar para próxima tarefa ✅" => {
+            println!(" {} Avançando para a próxima tarefa...\n", "✔".green());
+            Ok(CycleDecision::Proceed)
+        }
+
+        "Repetir esta tarefa 🔄" => {
+            let notes = tokio::task::spawn_blocking(|| {
+                inquire::Text::new("Notas para repetir a tarefa (opcional):")
+                    .with_help_message("Estas notas serão injetadas no próximo prompt da mesma tarefa")
+                    .prompt()
+            })
+            .await??;
+
+            let notes = if notes.trim().is_empty() { None } else { Some(notes) };
+
+            println!(" {} Repetindo a mesma tarefa...\n", "🔄".yellow());
+            Ok(CycleDecision::RepeatCurrentTask { user_notes: notes })
+        }
+
+        "Enriquecer e Repetir ✏️" => {
+            let notes = tokio::task::spawn_blocking(|| {
+                inquire::Editor::new("Instruções/notas para enriquecer e repetir:")
+                    .with_help_message("Use seu editor padrão. Feche para confirmar.")
+                    .prompt()
+            })
+            .await??;
+
+            if notes.trim().is_empty() {
+                println!(" {} Nenhuma nota adicionada. Prosseguindo com repetição simples...\n", "⚠".yellow());
+                Ok(CycleDecision::RepeatCurrentTask { user_notes: None })
+            } else {
+                println!(" {} Repetindo com enriquecimento...\n", "✏️".cyan());
+                Ok(CycleDecision::EnrichAndRepeat { user_notes: notes })
+            }
+        }
+
+        "Abortar plano ❌" => {
+            println!(" {} Abortando execução do plano.\n", "✘".red());
+            Ok(CycleDecision::Abort)
+        }
+
+        _ => Ok(CycleDecision::Abort),
+    }
 }

@@ -441,9 +441,14 @@ pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan
             }
         }
 
-        // Sem mais tarefas no modo plano → encerrar
+        // Sem mais tarefas no modo plano → encerrar com resumo
         if current_task.is_none() && is_plan_mode {
-            print_success("Todas as tarefas do plano foram concluídas.");
+            println!("\n{}", "══════════════════════════════════════════════════════════".bold());
+            println!("{}", "✅ PLANO CONCLUÍDO".bold().green());
+            println!("{}", "══════════════════════════════════════════════════════════".bold());
+            println!("Todas as tarefas foram finalizadas com sucesso.");
+            // TODO futuro: mostrar estatísticas (tarefas concluídas, repetições, etc.)
+            println!("{}", "══════════════════════════════════════════════════════════".bold());
             break;
         }
 
@@ -470,8 +475,18 @@ pub async fn execute(step: Option<String>, dry_run: bool, manual: bool, new_plan
             &mut config,
         ).await?;
 
-        // Controle de fluxo conforme design aprovado
-        match cycle_result.decision {
+        // ============================================================
+        // PASSO 5.5 - Gate Inter-Tarefa (decisão humana tem precedência)
+        // ============================================================
+        let human_decision = if is_plan_mode {
+            crate::commands::interactive_inter_task_gate(current_task.as_ref(), &cycle_result).await?
+        } else {
+            // No modo legado, respeitamos diretamente o resultado do ciclo
+            cycle_result.decision.clone()
+        };
+
+        // Controle de fluxo baseado na decisão do humano
+        match human_decision {
             CycleDecision::Proceed => {
                 // Marcar como completed SOMENTE aqui (regra do Auditor)
                 if let Some(ref task) = current_task {
