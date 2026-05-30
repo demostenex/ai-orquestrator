@@ -121,3 +121,61 @@ pub fn build_workspace_snapshot(workspace: &std::path::Path) -> String {
         out
     }
 }
+
+/// Função pura (Passo 5.2) — monta o prompt específico para execução de UMA tarefa
+/// do todo list de um plano aprovado.
+///
+/// O caller é responsável por compor com [MEMORY], workspace snapshot, last_handoff etc.
+pub fn build_dev_task_prompt(
+    plan_title: &str,
+    tasks: &[crate::schemas::Task],
+    current_task: &crate::schemas::Task,
+    user_notes: Option<&str>,
+) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("## MODO DEV ORIENTADO A TAREFAS (Passo 5)\n\n"));
+    out.push_str(&format!("Plano: {}\n\n", plan_title));
+
+    // Lista de progresso com marcadores (D1)
+    out.push_str("### Progresso do Todo List\n\n");
+    for t in tasks {
+        let marker = if t.id == current_task.id {
+            "⏳ CURRENT"
+        } else {
+            match t.status.as_str() {
+                "completed" => "✅ done",
+                "in_progress" => "⏳ in_progress (resetado)",
+                "blocked" => "[!] blocked",
+                _ => "⬜ pending",
+            }
+        };
+        let assigned = t.assigned_to.as_ref().map(|a| format!(" (@{})", a)).unwrap_or_default();
+        out.push_str(&format!("- {} — {}{}\n", marker, t.description, assigned));
+    }
+    out.push_str("\n");
+
+    // Tarefa atual
+    out.push_str("### TAREFA ATUAL\n\n");
+    out.push_str(&format!("ID: {}\n", current_task.id));
+    out.push_str(&format!("Descrição:\n{}\n\n", current_task.description.trim()));
+
+    if let Some(notes) = user_notes {
+        if !notes.trim().is_empty() {
+            out.push_str("### NOTAS DO HUMANO (gate inter-tarefa)\n\n");
+            out.push_str(&format!("{}\n\n", notes.trim()));
+            out.push_str("Aplique estas notas com prioridade nesta execução da tarefa.\n\n");
+        }
+    }
+
+    out.push_str("### Instruções\n");
+    out.push_str("- Implemente **exclusivamente** o escopo da TAREFA ATUAL acima.\n");
+    out.push_str("- Não altere tarefas que não sejam a current.\n");
+    out.push_str("- Gere apenas Unified Diff válido no campo `diff` do JSON.\n");
+    out.push_str("- Respeite o plano geral e o contexto de memory.\n");
+    out.push_str("- Após aprovação da auditoria, o orquestrador marcará esta tarefa como 'done'.\n\n");
+
+    out.push_str("Lembrete: sua resposta DEVE ser JSON válido conforme o system prompt (sem fences, sem texto extra).\n");
+
+    out
+}
