@@ -9,7 +9,7 @@ use crate::commands;
 #[command(name = "ai-orchestrator", version, about = "AI multi-agent orchestrator")]
 pub struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -106,15 +106,16 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { force, dry_run } => commands::init::execute(force, dry_run).await,
-        Commands::Run { step, dry_run, manual, new_plan, plan } => commands::run::execute(step, dry_run, manual, new_plan, plan).await,
-        Commands::Audit { patch, dry_run } => commands::audit::execute(patch, dry_run).await,
-        Commands::Apply { patch, dry_run } => commands::apply::execute(patch, dry_run).await,
-        Commands::Status { json, short, history, run_id } => commands::status::execute(json, short, history, run_id).await,
-        Commands::Session { command } => match command {
+        Some(Commands::Init { force, dry_run }) => commands::init::execute(force, dry_run).await,
+        Some(Commands::Run { step, dry_run, manual, new_plan, plan }) => commands::run::execute(step, dry_run, manual, new_plan, plan).await,
+        Some(Commands::Audit { patch, dry_run }) => commands::audit::execute(patch, dry_run).await,
+        Some(Commands::Apply { patch, dry_run }) => commands::apply::execute(patch, dry_run).await,
+        Some(Commands::Status { json, short, history, run_id }) => commands::status::execute(json, short, history, run_id).await,
+        Some(Commands::Session { command }) => match command {
             SessionCommands::List => crate::commands::session::list().await,
             SessionCommands::Kill { pid } => crate::commands::session::kill(pid).await,
         },
-        Commands::Plan { command } => commands::plan::execute(command).await,
+        Some(Commands::Plan { command }) => commands::plan::execute(command).await,
+        None => crate::tui::start().await,
     }
 }

@@ -4,3 +4,4 @@ pub mod commands;
 pub mod core;
 pub mod providers;
 pub mod schemas;
+pub mod tui;
