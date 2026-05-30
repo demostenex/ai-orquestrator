@@ -39,7 +39,6 @@ enum SelectorCtx {
 
 // Ações que precisam suspender o Ratatui (executar comando externo com output)
 enum Suspend {
-    NewPlan,
     ExecuteDev { plan_id: String },
 }
 
@@ -67,6 +66,8 @@ struct PromptField {
 
 enum PromptNext {
     ContinuePlanning { plan_id: String },
+    NewPlan,
+    GateEnrich,
 }
 
 struct PromptState {
@@ -79,6 +80,32 @@ struct PromptState {
 }
 
 impl PromptState {
+    fn for_new_plan() -> Self {
+        Self {
+            title: "Novo Plano",
+            fields: vec![
+                PromptField { label: "Título do plano", optional: false, default: None },
+            ],
+            current: 0,
+            buffer: String::new(),
+            collected: Vec::new(),
+            next: PromptNext::NewPlan,
+        }
+    }
+
+    fn for_enrich() -> Self {
+        Self {
+            title: "Enriquecer Plano",
+            fields: vec![
+                PromptField { label: "Notas para a IA (instruções de ajuste)", optional: false, default: None },
+            ],
+            current: 0,
+            buffer: String::new(),
+            collected: Vec::new(),
+            next: PromptNext::GateEnrich,
+        }
+    }
+
     fn for_continue(plan_id: String) -> Self {
         Self {
             title: "Continuar Planejamento",
@@ -251,6 +278,12 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                 app.gate_tx = Some(gate_tx);
                 app.view = AppView::Executing;
             }
+            LoopCmd::CreatePlan { title } => {
+                create_plan_native(&app.orchestrator_dir, title).await?;
+                app.summary = Db::get_home_summary(app.orchestrator_dir.clone()).await.unwrap_or_default();
+                app.plans = load_plans(&app.orchestrator_dir).await;
+                app.view = AppView::Home;
+            }
             LoopCmd::GateDecide(decision) => {
                 if let Some(ref tx) = app.gate_tx {
                     let _ = tx.send(decision);
@@ -289,6 +322,7 @@ enum LoopCmd {
     GoTo(AppView),
     Suspend(Suspend),
     StartPlanning { plan_id: String, cli1: String, cli2: Option<String>, max_turns: usize },
+    CreatePlan { title: String },
     GateDecide(crate::core::stream::GateDecision),
     LoadDashboard(String),
     ReloadDashboard,
@@ -317,7 +351,7 @@ fn dispatch_home(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
                 _ => app.home.selected(),
             };
             match idx {
-                0 => LoopCmd::Suspend(Suspend::NewPlan),
+                0 => LoopCmd::GoTo(AppView::Prompt(PromptState::for_new_plan())),
                 1 => {
                     app.selector = SelectorState::new(app.plans.len());
                     app.selector_ctx = SelectorCtx::ForContinue;
@@ -403,6 +437,13 @@ fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
                     let max_turns: usize = collected[2].parse().unwrap_or(10);
                     LoopCmd::StartPlanning { plan_id, cli1, cli2, max_turns }
                 }
+                PromptNext::NewPlan => {
+                    LoopCmd::CreatePlan { title: collected[0].clone() }
+                }
+                PromptNext::GateEnrich => {
+                    use crate::core::stream::GateDecision;
+                    LoopCmd::GateDecide(GateDecision::Enrich(collected[0].clone()))
+                }
             }
         }
         _ => LoopCmd::Continue,
@@ -420,6 +461,8 @@ fn dispatch_gate(key: KeyCode) -> LoopCmd {
     use crate::core::stream::GateDecision;
     match key {
         KeyCode::Char('c') | KeyCode::Enter => LoopCmd::GateDecide(GateDecision::Continue),
+        KeyCode::Char('e') => LoopCmd::GoTo(AppView::Prompt(PromptState::for_enrich())),
+        KeyCode::Char('f') => LoopCmd::GateDecide(GateDecision::Finalize),
         KeyCode::Char('a') | KeyCode::Esc => LoopCmd::GateDecide(GateDecision::Abort),
         _ => LoopCmd::Continue,
     }
@@ -577,7 +620,7 @@ fn render_gate(f: &mut Frame, exec: &ExecState, area: Rect) {
 
     // Gate de decisão
     let gate = Paragraph::new(
-        "\n  [C] / Enter  →  Continuar (aprovar turno)\n  [A] / Esc     →  Abortar planejamento"
+        "\n  [C] / Enter  →  Continuar (aprovar turno)\n  [E]           →  Enriquecer (adicionar notas)\n  [F]           →  Finalizar planejamento\n  [A] / Esc     →  Abortar"
     )
     .style(Style::default().fg(Color::Yellow))
     .block(
@@ -606,7 +649,7 @@ fn render_footer(f: &mut Frame, view: &AppView, area: Rect) {
         AppView::Executing =>
             "  q: Voltar ao Menu (planejamento continua em background)",
         AppView::Gate =>
-            "  C/Enter: Continuar   A/Esc: Abortar",
+            "  C/Enter: Continuar   E: Enriquecer   F: Finalizar   A/Esc: Abortar",
     };
     let footer = Paragraph::new(text)
         .style(Style::default().fg(Color::Gray))
@@ -631,9 +674,6 @@ async fn suspend_for_input(
     terminal.show_cursor()?;
 
     match action {
-        Suspend::NewPlan => {
-            crate::commands::plan::execute(PlanCommands::New { title: None }).await?;
-        }
         Suspend::ExecuteDev { plan_id } => {
             crate::commands::run::execute(None, false, false, false, Some(plan_id)).await?;
         }
@@ -661,6 +701,27 @@ async fn load_plans(orchestrator_dir: &PathBuf) -> Vec<PlanSummary> {
         return vec![];
     };
     db.list_plans().await.unwrap_or_default()
+}
+
+/// Cria um novo plano diretamente via DB, sem sair do raw mode.
+async fn create_plan_native(orchestrator_dir: &PathBuf, title: String) -> Result<()> {
+    use uuid::Uuid;
+    let config = crate::core::config::Config::load()?;
+    let plan_id = Uuid::new_v4().to_string();
+    let run_id = Uuid::new_v4().to_string();
+    let db = crate::core::db::Db::open(
+        orchestrator_dir,
+        &config.workspace_dir,
+        &run_id,
+        &config.step_id,
+        "planning",
+        "HEAD",
+        "",
+        "",
+    )?;
+    db.create_plan(&plan_id, &title).await?;
+    crate::commands::export_plan_to_markdown(orchestrator_dir, &db, &plan_id).await?;
+    Ok(())
 }
 
 /// Executa o loop de planejamento em background (chamado de std::thread com runtime próprio).

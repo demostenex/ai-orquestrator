@@ -195,6 +195,19 @@ pub async fn run_planning_loop(
                 Ok(crate::core::stream::GateDecision::Continue) => {
                     log_line(" ✔ Turno aprovado. Avançando...".to_string());
                 }
+                Ok(crate::core::stream::GateDecision::Enrich(notes)) => {
+                    let hash = crate::core::compute_sha256(&turn.content);
+                    db.add_plan_version(plan_id, &hash, Some(&notes)).await.ok();
+                    log_line(format!(" ✏️ Notas aplicadas. Continuando para próximo turno..."));
+                }
+                Ok(crate::core::stream::GateDecision::Finalize) => {
+                    log_line(" ✅ Finalizando planejamento...".to_string());
+                    db.lock_plan_tasks(plan_id).await.ok();
+                    let config = crate::core::config::Config::load()?;
+                    crate::commands::export_plan_to_markdown(&config.orchestrator_dir, db, plan_id).await.ok();
+                    log_line(" ✅ Planejamento finalizado e exportado.".to_string());
+                    return Ok(());
+                }
                 Ok(crate::core::stream::GateDecision::Abort) | Err(_) => {
                     log_line(" 🛑 Planejamento abortado.".to_string());
                     return Ok(());

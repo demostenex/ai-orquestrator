@@ -13,6 +13,8 @@ pub enum LogEvent {
 #[derive(Debug)]
 pub enum GateDecision {
     Continue,
+    Enrich(String), // notas humanas aplicadas antes do próximo turno
+    Finalize,
     Abort,
 }
 
