@@ -488,6 +488,80 @@ impl Db {
         }).await?
     }
 
+    /// Reseta todas as tarefas com status 'in_progress' de um plano para 'pending'.
+    /// Retorna o número de tarefas resetadas (0 se nenhuma).
+    /// Usado ao iniciar `run --plan <id>` (D2 do Passo 5).
+    pub async fn reset_in_progress_tasks(&self, plan_id: &str) -> Result<usize> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let now = Utc::now().to_rfc3339();
+
+            // Contar quantas estão in_progress
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE plan_id = ?1 AND status = 'in_progress'",
+                params![plid],
+                |r| r.get(0),
+            )?;
+
+            if count > 0 {
+                conn.execute(
+                    "UPDATE tasks SET status = 'pending', updated_at = ?1 WHERE plan_id = ?2 AND status = 'in_progress'",
+                    params![now, plid],
+                )?;
+            }
+
+            Ok(count as usize)
+        }).await?
+    }
+
+    /// Seleciona a próxima tarefa pendente (menor sequence) de um plano,
+    /// marca como 'in_progress' e a retorna.
+    /// Retorna None se não houver mais tarefas pendentes.
+    /// Usado pelo orquestrador antes de cada ciclo Dev no Modo --plan (Passo 5.3).
+    pub async fn pick_next_task(&self, plan_id: &str) -> Result<Option<crate::schemas::Task>> {
+        let pool = self.pool.clone();
+        let plid = plan_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+
+            // Encontra a primeira pending por sequence
+            let mut stmt = conn.prepare(
+                "SELECT id, description, status, assigned_to FROM tasks
+                 WHERE plan_id = ?1 AND status = 'pending'
+                 ORDER BY sequence ASC LIMIT 1"
+            )?;
+            let mut rows = stmt.query(params![plid])?;
+
+            let task_row = match rows.next()? {
+                Some(row) => {
+                    let task = crate::schemas::Task {
+                        id: row.get(0)?,
+                        description: row.get(1)?,
+                        status: row.get(2)?,
+                        assigned_to: row.get(3)?,
+                    };
+                    Some(task)
+                }
+                None => None,
+            };
+
+            if let Some(ref t) = task_row {
+                // Transição pending → in_progress (como "dev" para respeitar write_locked)
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "UPDATE tasks SET status = 'in_progress', updated_at = ?1 WHERE id = ?2",
+                    params![now, &t.id],
+                )?;
+            }
+
+            Ok(task_row)
+        }).await?
+    }
+
     // CA-MD1: Métodos de leitura para exportação
     pub async fn get_plan_title(&self, plan_id: &str) -> Result<String> {
         let pool = self.pool.clone();
