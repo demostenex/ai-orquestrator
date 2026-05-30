@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use colored::Colorize;
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::cli::PlanCommands;
-use crate::commands::{export_plan_to_markdown, print_success};
+use crate::commands::{export_plan_to_markdown, interactive_plan_gate, print_success};
 use crate::core::cli_runner::run_cli;
 use crate::core::config::Config;
 use crate::core::db::Db;
@@ -148,4 +149,57 @@ pub async fn run_planning_turn(
         content,
         timestamp: now,
     })
+}
+
+/// Executa o loop completo de planejamento interativo.
+/// Alterna entre os agentes fornecidos até atingir `max_turns` ou o usuário abortar/finalizar no gate.
+pub async fn run_planning_loop(
+    db: &Db,
+    orchestrator_dir: &Path,
+    plan_id: &str,
+    agents: &[(&str, &str, &str)], // (agent, role, cli_name)
+    max_turns: usize,
+) -> Result<()> {
+    if agents.is_empty() {
+        return Err(anyhow!("Lista de agentes não pode estar vazia"));
+    }
+
+    for turn_index in 0..max_turns {
+        let (agent, role, cli_name) = agents[turn_index % agents.len()];
+
+        println!(
+            "\n══════════════════════════════════════════════════════════"
+        );
+        println!(
+            " 🔄 TURNO {} | Agente: {} ({})",
+            turn_index + 1,
+            agent.cyan(),
+            role
+        );
+        println!(
+            "══════════════════════════════════════════════════════════"
+        );
+
+        // Executa um turno de planejamento
+        let turn = run_planning_turn(db, plan_id, agent, role, cli_name).await?;
+
+        // Apresenta ao usuário via portão interativo
+        match interactive_plan_gate(orchestrator_dir, db, plan_id, &turn.content).await {
+            Ok(_) => {
+                // Usuário aprovou ou enriqueceu → continua para próximo turno
+                println!(" {} Turno concluído. Avançando...\n", "✔".green());
+            }
+            Err(_) => {
+                // Usuário escolheu Abortar ou Finalizar
+                println!(" {} Planejamento finalizado pelo usuário.\n", "🛑".yellow());
+                return Ok(());
+            }
+        }
+    }
+
+    println!(
+        "Limite de {} turnos atingido. Planejamento encerrado.",
+        max_turns
+    );
+    Ok(())
 }
