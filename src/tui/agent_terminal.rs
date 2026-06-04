@@ -1,6 +1,6 @@
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,7 +92,20 @@ impl AgentTerminal {
         } else {
             self.full_text()
         };
-        let total_lines = text.lines().count();
+        // Conta linhas JÁ considerando o word-wrap pela largura do pane, senão o
+        // auto-scroll "come" texto (linhas longas ocupam várias linhas visuais).
+        let inner_width = area.width.saturating_sub(2).max(1) as usize;
+        let total_lines: usize = text
+            .lines()
+            .map(|l| {
+                let w = l.chars().count();
+                if w == 0 {
+                    1
+                } else {
+                    w.div_ceil(inner_width)
+                }
+            })
+            .sum();
         let top_line = total_lines
             .saturating_sub(visible_lines.saturating_add(self.scroll_offset))
             .min(u16::MAX as usize) as u16;
@@ -122,6 +135,7 @@ impl AgentTerminal {
                     ))
                     .title_alignment(Alignment::Center),
             )
+            .wrap(Wrap { trim: false })
             .scroll((top_line, 0));
         f.render_widget(panel, area);
     }

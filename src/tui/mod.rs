@@ -340,6 +340,9 @@ struct PromptState {
     custom_mode: bool,
     /// Última falha ao abrir o editor externo (mostrada no painel).
     editor_error: Option<String>,
+    /// Conteúdo inicial do editor quando o campo está vazio (ex.: enriquecer
+    /// pré-preenche com a resposta/perguntas do agente).
+    editor_prefill: Option<String>,
 }
 
 impl PromptState {
@@ -361,6 +364,7 @@ impl PromptState {
             pick_index: 0,
             custom_mode: false,
             editor_error: None,
+            editor_prefill: None,
         }
     }
 
@@ -383,15 +387,24 @@ impl PromptState {
         )
     }
 
-    fn for_enrich() -> Self {
-        Self::build(
+    fn for_enrich(prefill: String) -> Self {
+        let mut s = Self::build(
             "Enriquecer Plano",
             vec![PromptField::editor(
-                "Notas para a IA (Enter abre o editor)",
+                "Suas notas/respostas (Enter abre o editor com a resposta do agente)",
                 false,
             )],
             PromptNext::GateEnrich,
-        )
+        );
+        if !prefill.trim().is_empty() {
+            // Pré-preenche o editor com a resposta do agente (perguntas pendentes)
+            // para o humano responder/editar inline. Tudo que ficar salvo vira a nota.
+            s.editor_prefill = Some(format!(
+                "{}\n\n--- RESPONDA / EDITE ACIMA. Apague o que não precisar. ---\n",
+                prefill.trim()
+            ));
+        }
+        s
     }
 
     fn for_setup() -> Self {
@@ -1015,7 +1028,13 @@ fn open_editor_for_prompt(
     let AppView::Prompt(ref mut ps) = app.view else {
         return Ok(());
     };
-    let initial = ps.buffer.clone();
+    // Buffer já digitado tem prioridade; senão usa o prefill (ex.: resposta do
+    // agente no enriquecer).
+    let initial = if ps.buffer.is_empty() {
+        ps.editor_prefill.clone().unwrap_or_default()
+    } else {
+        ps.buffer.clone()
+    };
 
     // Suspende a TUI (sai do alternate screen / raw mode).
     disable_raw_mode()?;
@@ -1342,7 +1361,8 @@ fn dispatch_gate(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
     if app.exec.gate_type == "planning" {
         match key {
             KeyCode::Enter | KeyCode::Char('e') => {
-                LoopCmd::GoTo(AppView::Prompt(PromptState::for_enrich()))
+                let prefill = app.exec.gate_content.clone().unwrap_or_default();
+                LoopCmd::GoTo(AppView::Prompt(PromptState::for_enrich(prefill)))
             }
             KeyCode::Char('c') => LoopCmd::GateDecide(GateDecision::Finalize),
             KeyCode::Char('r') if app.exec.has_planning_reviewer => {
@@ -1356,7 +1376,10 @@ fn dispatch_gate(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
     } else {
         match key {
             KeyCode::Char('c') | KeyCode::Enter => LoopCmd::GateDecide(GateDecision::Continue),
-            KeyCode::Char('e') => LoopCmd::GoTo(AppView::Prompt(PromptState::for_enrich())),
+            KeyCode::Char('e') => {
+                let prefill = app.exec.gate_content.clone().unwrap_or_default();
+                LoopCmd::GoTo(AppView::Prompt(PromptState::for_enrich(prefill)))
+            }
             KeyCode::Char('f') => LoopCmd::GateDecide(GateDecision::Finalize),
             KeyCode::Char('a') | KeyCode::Esc => LoopCmd::GateDecide(GateDecision::Abort),
             _ => LoopCmd::Continue,
