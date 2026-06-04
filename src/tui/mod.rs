@@ -325,6 +325,8 @@ enum PromptNext {
     Setup,
 }
 
+const ENRICH_CONTEXT_MARKER: &str = "--- CONTEXTO DO AGENTE ABAIXO (NAO SERA SALVO COMO NOTA) ---";
+
 struct PromptState {
     title: &'static str,
     fields: Vec<PromptField>,
@@ -397,10 +399,11 @@ impl PromptState {
             PromptNext::GateEnrich,
         );
         if !prefill.trim().is_empty() {
-            // Pré-preenche o editor com a resposta do agente (perguntas pendentes)
-            // para o humano responder/editar inline. Tudo que ficar salvo vira a nota.
+            // Deixa a resposta do agente como referência, mas só salva o que o
+            // usuário escrever acima do marcador.
             s.editor_prefill = Some(format!(
-                "{}\n\n--- RESPONDA / EDITE ACIMA. Apague o que não precisar. ---\n",
+                "\n\n{}\n{}\n",
+                ENRICH_CONTEXT_MARKER,
                 prefill.trim()
             ));
         }
@@ -1258,7 +1261,13 @@ fn advance_prompt(ps: &mut PromptState, value: String) -> LoopCmd {
         },
         PromptNext::GateEnrich => {
             use crate::core::stream::GateDecision;
-            LoopCmd::GateDecide(GateDecision::Enrich(collected[0].clone()))
+            let notes = collected[0]
+                .split(ENRICH_CONTEXT_MARKER)
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            LoopCmd::GateDecide(GateDecision::Enrich(notes))
         }
         PromptNext::DevMode { plan_id } => {
             let cli_dev = collected[0].clone();

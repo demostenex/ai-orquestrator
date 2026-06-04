@@ -118,7 +118,7 @@ impl CliAdapter for GrokBuild {
         "grok"
     }
     fn command(&self) -> &'static str {
-        "grok"
+        "grok --no-memory --no-plan --verbatim --output-format plain"
     }
     fn prompt_file_arg(&self) -> Option<&'static str> {
         Some("--prompt-file")
@@ -179,7 +179,10 @@ mod tests {
         assert_eq!(resolve_command("codex"), "codex exec --skip-git-repo-check");
         assert_eq!(resolve_command("claude"), "claude -p");
         assert_eq!(resolve_command("gemini"), "gemini");
-        assert_eq!(resolve_command("grok"), "grok");
+        assert_eq!(
+            resolve_command("grok"),
+            "grok --no-memory --no-plan --verbatim --output-format plain"
+        );
         assert_eq!(
             resolve_command("  codex  "),
             "codex exec --skip-git-repo-check"

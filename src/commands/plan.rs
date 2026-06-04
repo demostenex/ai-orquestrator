@@ -13,6 +13,10 @@ use crate::core::config::Config;
 use crate::core::db::Db;
 use crate::schemas::PlanTurn;
 
+const MAX_HISTORY_TURNS: usize = 12;
+const MAX_TURN_CONTENT_CHARS: usize = 12_000;
+const MAX_PLANNING_PROMPT_CHARS: usize = 160_000;
+
 /// Ponto de entrada para o subcomando `plan`.
 pub async fn execute(command: PlanCommands) -> Result<()> {
     match command {
@@ -150,8 +154,33 @@ async fn new_plan(title: Option<String>) -> Result<()> {
     Ok(())
 }
 
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in value.chars().enumerate() {
+        if idx >= max_chars {
+            out.push_str(
+                "\n\n[... trecho truncado pelo ai-orchestrator para caber no contexto ...]",
+            );
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn is_substantive_human_note(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let without_punctuation = trimmed.trim_matches(|c: char| {
+        c.is_ascii_punctuation() || c.is_whitespace() || matches!(c, '…' | '。' | '，')
+    });
+    !without_punctuation.is_empty()
+}
+
 /// Função pura que monta o prompt para o próximo turno de planejamento.
-/// Recebe o histórico completo de turnos e o papel da IA atual.
+/// Recebe o histórico de turnos e o papel da IA atual.
 pub fn build_planning_prompt(turns: &[crate::schemas::PlanTurn], role: &str) -> String {
     let mut prompt = String::new();
 
@@ -163,15 +192,30 @@ pub fn build_planning_prompt(turns: &[crate::schemas::PlanTurn], role: &str) -> 
     if turns.is_empty() {
         prompt.push_str("Este é o primeiro turno do planejamento.\n\n");
     } else {
-        prompt.push_str("Abaixo está o histórico completo dos turnos anteriores:\n\n");
+        prompt.push_str("Abaixo está o histórico recente dos turnos anteriores.\n");
+        prompt.push_str(
+            "Use respostas e decisões como fonte de verdade; prompts antigos foram omitidos para evitar contexto recursivo.\n\n",
+        );
 
-        for turn in turns {
+        let skipped = turns.len().saturating_sub(MAX_HISTORY_TURNS);
+        if skipped > 0 {
+            prompt.push_str(&format!(
+                "[{} turno(s) mais antigo(s) omitido(s) para manter o prompt compacto.]\n\n",
+                skipped
+            ));
+        }
+
+        for turn in turns.iter().skip(skipped) {
+            let content = if turn.agent == "human" && !is_substantive_human_note(&turn.content) {
+                "[input humano vazio/minimo ignorado]".to_string()
+            } else {
+                truncate_chars(turn.content.trim(), MAX_TURN_CONTENT_CHARS)
+            };
             prompt.push_str(&format!(
                 "--- Turno {} | Agente: {} | {}\n",
                 turn.sequence, turn.agent, turn.timestamp
             ));
-            prompt.push_str(&format!("Prompt enviado:\n{}\n\n", turn.prompt.trim()));
-            prompt.push_str(&format!("Resposta recebida:\n{}\n\n", turn.content.trim()));
+            prompt.push_str(&format!("Conteudo registrado:\n{}\n\n", content.trim()));
         }
     }
 
@@ -187,7 +231,7 @@ pub fn build_planning_prompt(turns: &[crate::schemas::PlanTurn], role: &str) -> 
         "- Se faltar contexto humano, peça esclarecimento ou proponha perguntas objetivas.\n\n",
     );
 
-    prompt
+    truncate_chars(&prompt, MAX_PLANNING_PROMPT_CHARS)
 }
 
 /// Executa um turno completo de planejamento:
@@ -291,7 +335,7 @@ pub async fn run_planning_loop(
 
     if let Some(notes) = initial_human_notes
         .map(str::trim)
-        .filter(|notes| !notes.is_empty())
+        .filter(|notes| is_substantive_human_note(notes))
     {
         // Sempre registra o briefing humano como um turno. Antes só gravava
         // quando o plano estava vazio, o que descartava silenciosamente o
@@ -380,6 +424,13 @@ pub async fn run_planning_loop(
                             PlanningPhaseOutcome::Proceed
                         }
                         Ok(crate::core::stream::GateDecision::Enrich(notes)) => {
+                            if !is_substantive_human_note(&notes) {
+                                log_line(
+                                    " ℹ️ Notas vazias/minimas ignoradas. Prosseguindo..."
+                                        .to_string(),
+                                );
+                                break;
+                            }
                             let hash = crate::core::compute_sha256(&turn.content);
                             db.add_plan_version(plan_id, &hash, Some(&notes)).await.ok();
                             db.add_plan_turn(
@@ -631,4 +682,45 @@ async fn continue_plan(
     .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn turn(sequence: i64, agent: &str, prompt: &str, content: &str) -> PlanTurn {
+        PlanTurn {
+            sequence,
+            agent: agent.to_string(),
+            prompt: prompt.to_string(),
+            content: content.to_string(),
+            timestamp: "2026-06-04T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn planning_prompt_omits_prior_prompts_to_avoid_recursive_growth() {
+        let prior_prompt = "PROMPT_ANTIGO_QUE_NAO_DEVE_VOLTAR".repeat(100);
+        let turns = vec![turn(
+            1,
+            "architect",
+            &prior_prompt,
+            "Decisao: usar CLI Node.js com BigInt.",
+        )];
+
+        let prompt = build_planning_prompt(&turns, "Revisor");
+
+        assert!(prompt.contains("Decisao: usar CLI Node.js com BigInt."));
+        assert!(!prompt.contains("PROMPT_ANTIGO_QUE_NAO_DEVE_VOLTAR"));
+        assert!(!prompt.contains("Prompt enviado:"));
+    }
+
+    #[test]
+    fn punctuation_only_human_notes_are_ignored_in_planning_prompt() {
+        let turns = vec![turn(1, "human", "label", ".")];
+
+        let prompt = build_planning_prompt(&turns, "Arquiteto");
+
+        assert!(prompt.contains("[input humano vazio/minimo ignorado]"));
+    }
 }
