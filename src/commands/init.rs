@@ -5,9 +5,7 @@ use chrono::Utc;
 use colored::Colorize;
 use uuid::Uuid;
 
-use crate::commands::{
-    print_step, print_success, print_warning, save_cycle, write_json, write_string,
-};
+use crate::commands::{print_step, print_success, save_cycle, write_json, write_string};
 use crate::core::compute_sha256;
 use crate::core::config::{detect_workspace_dir, StoredConfig};
 use crate::core::git;
@@ -77,26 +75,6 @@ pub async fn execute(force: bool, dry_run: bool) -> Result<()> {
         },
     )?;
 
-    let plan_hash = compute_sha256(PLAN_TEMPLATE);
-    let memory_hash = compute_sha256(MEMORY_TEMPLATE);
-    let base_commit =
-        git::get_head_commit(&workspace_dir).unwrap_or_else(|_| "unknown".to_string());
-    let cycle = CycleState {
-        run_id: Uuid::new_v4().to_string(),
-        step_id: stored_config.step_id.clone(),
-        status: CycleStatus::Initialized,
-        base_commit,
-        plan_hash,
-        memory_hash,
-        patch_file: None,
-        patch_hash: None,
-        audit_file: None,
-        audit_approved: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-    save_cycle(&orchestrator_dir, &cycle)?;
-
     // Garantir que .ai-orchestrator/ está no .gitignore para não sujar o working tree
     let gitignore_path = workspace_dir.join(".gitignore");
     let entry = ".ai-orchestrator/\n";
@@ -116,11 +94,24 @@ pub async fn execute(force: bool, dry_run: bool) -> Result<()> {
         print_step("Adicionado .ai-orchestrator/ ao .gitignore");
     }
 
-    if !workspace_dir.join(".git").exists() {
-        print_warning(
-            "Diretório atual não parece ser um repositório Git. Alguns comandos poderão falhar.",
-        );
-    }
+    let plan_hash = compute_sha256(PLAN_TEMPLATE);
+    let memory_hash = compute_sha256(MEMORY_TEMPLATE);
+    let base_commit = git::ensure_repository(&workspace_dir)?;
+    let cycle = CycleState {
+        run_id: Uuid::new_v4().to_string(),
+        step_id: stored_config.step_id.clone(),
+        status: CycleStatus::Initialized,
+        base_commit,
+        plan_hash,
+        memory_hash,
+        patch_file: None,
+        patch_hash: None,
+        audit_file: None,
+        audit_approved: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    save_cycle(&orchestrator_dir, &cycle)?;
 
     print_success("AI Orchestrator inicializado com sucesso.");
     println!(

@@ -595,6 +595,7 @@ pub async fn execute(
 ) -> Result<()> {
     let mut config = Config::load()?;
     let step_id = step.unwrap_or_else(|| config.step_id.clone());
+    let base_commit = git::ensure_repository(&config.workspace_dir)?;
 
     if !git::is_clean_tree(&config.workspace_dir)? {
         return Err(anyhow!(
@@ -753,7 +754,6 @@ pub async fn execute(
     );
     println!("{}", "══════════════════════════════════════".bold());
 
-    let base_commit = git::get_head_commit(&config.workspace_dir)?;
     let run_id = Uuid::new_v4().to_string();
 
     // ── Abrir banco com o run_id definitivo (único para todo o run --plan) ────
@@ -924,6 +924,7 @@ pub async fn execute_tui(
 
     let config = Config::load()?;
     let cli_audit = cli_audit.ok_or_else(|| anyhow::anyhow!("CLI da Auditora é obrigatório"))?;
+    let base_commit = git::ensure_repository(&config.workspace_dir)?;
 
     if !git::is_clean_tree(&config.workspace_dir)? {
         return Err(anyhow::anyhow!(
@@ -937,7 +938,6 @@ pub async fn execute_tui(
     let plan = std::fs::read_to_string(&plan_path).unwrap_or_default();
     let plan_hash = compute_sha256(&plan);
     let memory_hash = compute_sha256(&memory);
-    let base_commit = git::get_head_commit(&config.workspace_dir)?;
     let run_id = uuid::Uuid::new_v4().to_string();
 
     let db = Db::open(

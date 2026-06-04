@@ -18,6 +18,48 @@ fn get_head_commit_returns_40_char_hash() {
     assert!(commit.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
+#[test]
+fn ensure_repository_initializes_non_git_workspace() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::write(dir.path().join("README.md"), "# Teste\n").unwrap();
+    fs::create_dir_all(dir.path().join(".ai-orchestrator")).unwrap();
+    fs::write(
+        dir.path().join(".ai-orchestrator").join("plan.md"),
+        "ignore me",
+    )
+    .unwrap();
+
+    let commit = git::ensure_repository(dir.path()).unwrap();
+
+    assert_eq!(commit.len(), 40);
+    assert!(dir.path().join(".git").exists());
+    assert!(git::is_clean_tree(dir.path()).unwrap());
+    let tracked = std::process::Command::new("git")
+        .args(["ls-files"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let tracked = String::from_utf8_lossy(&tracked.stdout);
+    assert!(tracked.contains("README.md"));
+    assert!(tracked.contains(".gitignore"));
+    assert!(!tracked.contains(".ai-orchestrator/plan.md"));
+}
+
+#[test]
+fn ensure_repository_creates_initial_commit_for_unborn_repo() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let commit = git::ensure_repository(dir.path()).unwrap();
+
+    assert_eq!(commit.len(), 40);
+    assert!(git::is_clean_tree(dir.path()).unwrap());
+}
+
 // ── is_clean_tree ─────────────────────────────────────────────────────────────
 
 #[test]
