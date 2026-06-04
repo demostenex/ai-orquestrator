@@ -27,9 +27,15 @@ pub fn detect_available_clis() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Verifica se um CLI está disponível no PATH.
+/// Valida apenas o primeiro token, de modo que comandos com subcomando/flags
+/// (ex.: `codex exec`, `llm -m gpt-4o`) sejam aceitos — o `which` roda só sobre
+/// o binário.
 pub fn is_cli_available(cmd: &str) -> bool {
+    let Some(bin) = cmd.split_whitespace().next() else {
+        return false;
+    };
     Command::new("which")
-        .arg(cmd)
+        .arg(bin)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

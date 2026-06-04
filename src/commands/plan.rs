@@ -24,7 +24,62 @@ pub async fn execute(command: PlanCommands) -> Result<()> {
             cli2,
             max_turns,
         } => continue_plan(plan_id, cli1, cli2, max_turns).await,
+        PlanCommands::Delete { plan_id, yes } => delete_plan_cmd(plan_id, yes).await,
     }
+}
+
+/// Remove um plano e todo o seu conteúdo. Pede confirmação a menos que `yes`.
+async fn delete_plan_cmd(plan_id: String, yes: bool) -> Result<()> {
+    let config = Config::load()?;
+    let db = Db::open(
+        &config.orchestrator_dir,
+        &config.workspace_dir,
+        &Uuid::new_v4().to_string(), // run_id temporário só para esta operação
+        &config.step_id,
+        "planning",
+        "HEAD",
+        "",
+        "",
+    )?;
+
+    let title = match db.get_plan_title(&plan_id).await {
+        Ok(t) => t,
+        Err(_) => {
+            return Err(anyhow!("Plano '{}' não encontrado.", plan_id));
+        }
+    };
+    let tasks = db.get_plan_tasks(&plan_id).await.unwrap_or_default();
+
+    if !yes {
+        let prompt = format!(
+            "Remover o plano \"{}\" (ID {}) e suas {} tarefa(s)? Esta ação é irreversível.",
+            title,
+            plan_id,
+            tasks.len()
+        );
+        let confirmed = tokio::task::spawn_blocking(move || {
+            inquire::Confirm::new(&prompt)
+                .with_default(false)
+                .prompt()
+                .unwrap_or(false)
+        })
+        .await?;
+        if !confirmed {
+            println!("{}", "Cancelado.".yellow());
+            return Ok(());
+        }
+    }
+
+    let removed = db.delete_plan(&plan_id).await?;
+    if removed == 0 {
+        println!("{}", format!("Plano '{}' não encontrado.", plan_id).yellow());
+    } else {
+        println!(
+            "{}",
+            format!("✔ Plano \"{}\" removido.", title).green()
+        );
+    }
+    Ok(())
 }
 
 async fn new_plan(title: Option<String>) -> Result<()> {

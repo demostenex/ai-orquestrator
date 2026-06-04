@@ -111,6 +111,13 @@ pub enum PlanCommands {
         #[arg(long, default_value_t = 10, help = "Número máximo de turnos")]
         max_turns: usize,
     },
+    #[command(about = "Remove um plano e todo o seu conteúdo (tarefas, turnos, versões)")]
+    Delete {
+        #[arg(short, long, help = "ID do plano a ser removido")]
+        plan_id: String,
+        #[arg(long, help = "Pula a confirmação interativa")]
+        yes: bool,
+    },
 }
 
 pub async fn run() -> Result<()> {

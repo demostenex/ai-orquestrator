@@ -433,6 +433,27 @@ impl Db {
         .await?
     }
 
+    /// Remove um plano e todos os seus filhos (tasks, plan_turns, plan_versions).
+    /// Operação atômica via transação. Retorna o nº de linhas removidas da
+    /// tabela `plans` (0 se o plano não existia).
+    pub async fn delete_plan(&self, plan_id: &str) -> Result<usize> {
+        let pool = self.pool.clone();
+        let id = plan_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = pool.get()?;
+            let tx = conn.transaction()?;
+            // Ordem filho→pai (seguro mesmo sem ON DELETE CASCADE).
+            tx.execute("DELETE FROM tasks WHERE plan_id = ?1", params![id])?;
+            tx.execute("DELETE FROM plan_turns WHERE plan_id = ?1", params![id])?;
+            tx.execute("DELETE FROM plan_versions WHERE plan_id = ?1", params![id])?;
+            let removed = tx.execute("DELETE FROM plans WHERE id = ?1", params![id])?;
+            tx.commit()?;
+            Ok(removed)
+        })
+        .await?
+    }
+
     pub async fn add_plan_turn(
         &self,
         plan_id: &str,

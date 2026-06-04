@@ -50,6 +50,7 @@ pub fn render(
     state: &mut SelectorState,
     plans: &[PlanSummary],
     context: &str,
+    confirm: Option<&str>,
     area: Rect,
 ) {
     let chunks = Layout::default()
@@ -60,19 +61,28 @@ pub fn render(
         ])
         .split(area);
 
-    // Header de contexto
-    let header_text = format!("\n  {}\n  {} plano(s) disponível(is)", context, plans.len());
+    // Header: contexto normal, ou banner de confirmação de exclusão em vermelho.
+    let (header_text, accent, title) = match confirm {
+        Some(msg) => (
+            format!("\n  {}", msg),
+            Color::Red,
+            " Confirmar Exclusão ",
+        ),
+        None => (
+            format!("\n  {}\n  {} plano(s) disponível(is)", context, plans.len()),
+            Color::Cyan,
+            " Selecionar Plano ",
+        ),
+    };
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan))
+        .style(Style::default().fg(accent))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(accent))
                 .title(Span::styled(
-                    " Selecionar Plano ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    title,
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
                 ))
                 .title_alignment(Alignment::Center),
         );

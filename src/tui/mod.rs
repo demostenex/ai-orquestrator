@@ -391,6 +391,8 @@ struct TuiApp {
     exec: ExecState,
     log_rx: Option<crate::core::stream::LogRx>,
     gate_tx: Option<crate::core::stream::GateTx>,
+    /// Quando `Some(plan_id)`, o seletor está aguardando confirmação de exclusão.
+    pending_delete: Option<String>,
 }
 
 impl TuiApp {
@@ -416,6 +418,7 @@ impl TuiApp {
             exec: ExecState::new(String::new()),
             log_rx: None,
             gate_tx: None,
+            pending_delete: None,
         }
     }
 }
@@ -682,6 +685,15 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                 app.dash_data = data;
                 app.view = AppView::Dashboard;
             }
+            LoopCmd::DeletePlan(plan_id) => {
+                delete_plan_native(&app.orchestrator_dir, &plan_id).await?;
+                app.summary = Db::get_home_summary(app.orchestrator_dir.clone())
+                    .await
+                    .unwrap_or_default();
+                app.plans = load_plans(&app.orchestrator_dir).await;
+                // Mantém o seletor consistente após remover um item.
+                app.selector = SelectorState::new(app.plans.len());
+            }
             LoopCmd::ReloadDashboard => {
                 let data = DashboardState::load(
                     app.orchestrator_dir.clone(),
@@ -744,6 +756,7 @@ enum LoopCmd {
     },
     GateDecide(crate::core::stream::GateDecision),
     LoadDashboard(String),
+    DeletePlan(String),
     ReloadDashboard,
     LoadMemory(String),
     SaveSetup {
@@ -850,6 +863,21 @@ fn dispatch_home(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
 }
 
 fn dispatch_selector(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
+    // Modo confirmação de exclusão: só aceita sim/não.
+    if let Some(plan_id) = app.pending_delete.clone() {
+        return match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('s') | KeyCode::Char('S') => {
+                app.pending_delete = None;
+                LoopCmd::DeletePlan(plan_id)
+            }
+            _ => {
+                // qualquer outra tecla (n, Esc, …) cancela
+                app.pending_delete = None;
+                LoopCmd::Continue
+            }
+        };
+    }
+
     match key {
         KeyCode::Char('q') | KeyCode::Esc => LoopCmd::GoTo(AppView::Home),
         KeyCode::Up => {
@@ -858,6 +886,12 @@ fn dispatch_selector(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
         }
         KeyCode::Down => {
             app.selector.move_down(app.plans.len());
+            LoopCmd::Continue
+        }
+        KeyCode::Char('d') | KeyCode::Delete => {
+            if let Some(plan) = app.selector.pick(&app.plans) {
+                app.pending_delete = Some(plan.id.clone());
+            }
             LoopCmd::Continue
         }
         KeyCode::Enter => {
@@ -1130,7 +1164,23 @@ fn render_app(f: &mut Frame<'_>, app: &mut TuiApp) {
                 SelectorCtx::ForContinue => "Selecionar plano para continuar o planejamento",
                 SelectorCtx::ForDev => "Selecionar plano para Executar Modo Dev",
             };
-            plan_selector::render(f, &mut app.selector, &app.plans, label, chunks[1]);
+            let confirm = app.pending_delete.as_ref().map(|id| {
+                let title = app
+                    .plans
+                    .iter()
+                    .find(|p| &p.id == id)
+                    .map(|p| p.title.as_str())
+                    .unwrap_or("plano");
+                format!("Remover \"{}\"? Isso apaga tarefas/turnos. (s/n)", title)
+            });
+            plan_selector::render(
+                f,
+                &mut app.selector,
+                &app.plans,
+                label,
+                confirm.as_deref(),
+                chunks[1],
+            );
         }
         AppView::Dashboard => {
             dashboard::render_body(f, &app.dash_data, &mut app.dash_ui, chunks[1]);
@@ -1372,7 +1422,9 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
         AppView::Home => {
             "  ↑↓: Navegar   Enter: Executar   1-6: Atalho   r: Recarregar Memória   q: Sair"
         }
-        AppView::Selector(_) => "  ↑↓: Navegar   Enter: Selecionar   q/Esc: Voltar ao Menu",
+        AppView::Selector(_) => {
+            "  ↑↓: Navegar   Enter: Selecionar   d: Deletar   q/Esc: Voltar ao Menu"
+        }
         AppView::Dashboard => {
             "  ↑↓: Feed   Enter: Carregar Handoff   r: Recarregar   q/Esc: Voltar"
         }
@@ -1456,6 +1508,23 @@ async fn create_plan_native(orchestrator_dir: &Path, title: String) -> Result<()
     )?;
     db.create_plan(&plan_id, &title).await?;
     crate::commands::export_plan_to_markdown(orchestrator_dir, &db, &plan_id).await?;
+    Ok(())
+}
+
+async fn delete_plan_native(orchestrator_dir: &Path, plan_id: &str) -> Result<()> {
+    use uuid::Uuid;
+    let config = crate::core::config::Config::load()?;
+    let db = crate::core::db::Db::open(
+        orchestrator_dir,
+        &config.workspace_dir,
+        &Uuid::new_v4().to_string(),
+        &config.step_id,
+        "planning",
+        "HEAD",
+        "",
+        "",
+    )?;
+    db.delete_plan(plan_id).await?;
     Ok(())
 }
 

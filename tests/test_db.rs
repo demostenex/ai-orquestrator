@@ -46,6 +46,38 @@ async fn db_get_plan_title_returns_correct_title() {
     assert_eq!(title, "My Test Plan");
 }
 
+#[tokio::test]
+async fn db_delete_plan_removes_plan_and_children() {
+    let (_dir, db) = common::make_temp_db().await;
+    db.create_plan("plan-del", "To be deleted").await.unwrap();
+    db.create_plan("plan-keep", "Survivor").await.unwrap();
+    db.add_task("t-1", "plan-del", "task um", None, 1)
+        .await
+        .unwrap();
+    db.add_plan_turn("plan-del", "architect", "prompt", "content")
+        .await
+        .unwrap();
+
+    let removed = db.delete_plan("plan-del").await.unwrap();
+    assert_eq!(removed, 1);
+
+    // Plano sobrevivente permanece; o removido some.
+    let plans = db.list_plans().await.unwrap();
+    let ids: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, vec!["plan-keep"]);
+
+    // Filhos do plano removido foram apagados.
+    assert!(db.get_plan_tasks("plan-del").await.unwrap().is_empty());
+    assert!(db.get_plan_turns("plan-del").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn db_delete_plan_returns_zero_when_absent() {
+    let (_dir, db) = common::make_temp_db().await;
+    let removed = db.delete_plan("nao-existe").await.unwrap();
+    assert_eq!(removed, 0);
+}
+
 // ── Tarefas ───────────────────────────────────────────────────────────────────
 
 #[tokio::test]
