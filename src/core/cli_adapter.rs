@@ -29,6 +29,11 @@ pub trait CliAdapter: Send + Sync {
     fn binary(&self) -> &'static str;
     /// Comando shell completo rodado via `sh -c` (binário + subcomando + flags).
     fn command(&self) -> &'static str;
+    /// Algumas CLIs não leem prompt por stdin. Quando definido, o runner grava
+    /// o prompt em arquivo temporário e acrescenta este argumento ao comando.
+    fn prompt_file_arg(&self) -> Option<&'static str> {
+        None
+    }
     /// Variáveis de ambiente extras necessárias ao modo não-interativo.
     fn env(&self) -> &'static [(&'static str, &'static str)] {
         &[]
@@ -113,7 +118,10 @@ impl CliAdapter for GrokBuild {
         "grok"
     }
     fn command(&self) -> &'static str {
-        "grok build"
+        "grok"
+    }
+    fn prompt_file_arg(&self) -> Option<&'static str> {
+        Some("--prompt-file")
     }
 }
 
@@ -171,7 +179,7 @@ mod tests {
         assert_eq!(resolve_command("codex"), "codex exec --skip-git-repo-check");
         assert_eq!(resolve_command("claude"), "claude -p");
         assert_eq!(resolve_command("gemini"), "gemini");
-        assert_eq!(resolve_command("grok"), "grok build");
+        assert_eq!(resolve_command("grok"), "grok");
         assert_eq!(
             resolve_command("  codex  "),
             "codex exec --skip-git-repo-check"

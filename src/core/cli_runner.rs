@@ -1,4 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Result};
@@ -17,6 +18,21 @@ const KNOWN_CLIS: &[(&str, &str)] = &[
     ("sgpt", "ShellGPT CLI"),
     ("copilot", "GitHub Copilot CLI"),
 ];
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn temp_prompt_path(cli_id: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "ai-orchestrator-{}-prompt-{}-{}.md",
+        cli_id,
+        std::process::id(),
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    path
+}
 
 /// Detecta quais CLIs conhecidos estão instalados no PATH.
 pub fn detect_available_clis() -> Vec<(&'static str, &'static str)> {
@@ -132,10 +148,29 @@ pub fn run_cli(
     // ao final, limpar o stdout antes de devolver ao parser do agente.
     let adapter = crate::core::cli_adapter::adapter_for_command(cli_cmd);
 
+    let mut prompt_file: Option<std::path::PathBuf> = None;
+    let effective_cli_cmd = if let Some(ref a) = adapter {
+        if let Some(arg) = a.prompt_file_arg() {
+            let path = temp_prompt_path(a.id());
+            std::fs::write(&path, prompt)?;
+            prompt_file = Some(path.clone());
+            format!(
+                "{} {} {}",
+                cli_cmd,
+                arg,
+                shell_quote(&path.display().to_string())
+            )
+        } else {
+            cli_cmd.to_string()
+        }
+    } else {
+        cli_cmd.to_string()
+    };
+
     let mut command = Command::new("sh");
     command
         .arg("-c")
-        .arg(cli_cmd)
+        .arg(&effective_cli_cmd)
         .env("GEMINI_CLI_TRUST_WORKSPACE", "true") // legado, inofensivo
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -147,20 +182,22 @@ pub fn run_cli(
     }
     let mut child = command
         .spawn()
-        .map_err(|e| anyhow!("falha ao executar CLI '{cli_cmd}': {e}"))?;
+        .map_err(|e| anyhow!("falha ao executar CLI '{effective_cli_cmd}': {e}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes())?;
+    if prompt_file.is_none() {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(prompt.as_bytes())?;
+        }
     }
 
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| anyhow!("stdout não disponível para '{cli_cmd}'"))?;
+        .ok_or_else(|| anyhow!("stdout não disponível para '{effective_cli_cmd}'"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| anyhow!("stderr não disponível para '{cli_cmd}'"))?;
+        .ok_or_else(|| anyhow!("stderr não disponível para '{effective_cli_cmd}'"))?;
 
     let stderr_log = log.clone();
     let stderr_reader = std::thread::spawn(move || {
@@ -201,7 +238,8 @@ pub fn run_cli(
 
     let status = child
         .wait()
-        .map_err(|e| anyhow!("falha aguardando CLI '{cli_cmd}': {e}"))?;
+        .map_err(|e| anyhow!("falha aguardando CLI '{effective_cli_cmd}': {e}"))?;
+    cleanup_prompt_file(prompt_file.as_deref());
     let stderr_output = stderr_reader
         .join()
         .unwrap_or_else(|_| "falha lendo stderr do CLI".to_string());
@@ -209,10 +247,13 @@ pub fn run_cli(
     if !status.success() {
         let stderr_msg = stderr_output.trim();
         if stderr_msg.is_empty() {
-            return Err(anyhow!("CLI '{cli_cmd}' retornou exit code {}", status));
+            return Err(anyhow!(
+                "CLI '{effective_cli_cmd}' retornou exit code {}",
+                status
+            ));
         }
         return Err(anyhow!(
-            "CLI '{cli_cmd}' retornou exit code {}: {}",
+            "CLI '{effective_cli_cmd}' retornou exit code {}: {}",
             status,
             stderr_msg
         ));
@@ -224,6 +265,12 @@ pub fn run_cli(
         None => full_output,
     };
     Ok(output)
+}
+
+fn cleanup_prompt_file(path: Option<&Path>) {
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// Envia o prompt para uma sessão PTY existente e lê a resposta até detectar que a IA parou de escrever.
