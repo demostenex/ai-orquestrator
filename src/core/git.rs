@@ -59,9 +59,11 @@ pub fn ensure_repository(workspace: &Path) -> Result<String> {
 }
 
 pub fn is_clean_tree(workspace: &Path) -> Result<bool> {
-    Ok(run_git(workspace, &["status", "--porcelain"])?
-        .trim()
-        .is_empty())
+    Ok(status_porcelain(workspace)?.trim().is_empty())
+}
+
+pub fn status_porcelain(workspace: &Path) -> Result<String> {
+    run_git(workspace, &["status", "--porcelain"])
 }
 
 pub fn apply_check(workspace: &Path, patch_path: &Path) -> Result<()> {

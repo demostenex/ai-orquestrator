@@ -990,10 +990,49 @@ pub async fn execute_tui(
     let cli_audit = cli_audit.ok_or_else(|| anyhow::anyhow!("CLI da Auditora é obrigatório"))?;
     let base_commit = git::ensure_repository(&config.workspace_dir)?;
 
-    if !git::is_clean_tree(&config.workspace_dir)? {
-        return Err(anyhow::anyhow!(
-            "working tree dirty — commit ou stash antes de rodar"
-        ));
+    let mut dirty_check_attempts = 0usize;
+    loop {
+        let status = git::status_porcelain(&config.workspace_dir)?;
+        if status.trim().is_empty() {
+            if dirty_check_attempts > 0 {
+                send("✔ Workspace limpo. Continuando Modo Dev...".to_string());
+            }
+            break;
+        }
+
+        let retry_note = if dirty_check_attempts == 0 {
+            "O Modo Dev precisa de uma árvore Git limpa antes de começar.".to_string()
+        } else {
+            format!(
+                "Rechecagem #{}: ainda há mudanças pendentes.",
+                dirty_check_attempts
+            )
+        };
+        send_gate(
+            format!(
+                "{}\n\nWorkspace com mudanças pendentes em {}\n\n{}\n\nLimpe/commite/stash em outro terminal e pressione C para verificar novamente.\nEm workspace descartável, um comando possível é: git -C {} clean -fd",
+                retry_note,
+                config.workspace_dir.display(),
+                status.trim(),
+                config.workspace_dir.display()
+            ),
+            "dirty_workspace",
+        );
+        match recv_gate() {
+            GateDecision::Continue | GateDecision::Review => {
+                dirty_check_attempts += 1;
+                continue;
+            }
+            GateDecision::Abort | GateDecision::Finalize => {
+                send("🛑 Modo Dev abortado: workspace continua sujo.".to_string());
+                let _ = log_tx.send(LogEvent::Done);
+                return Ok(());
+            }
+            GateDecision::Enrich(_) => {
+                dirty_check_attempts += 1;
+                continue;
+            }
+        }
     }
 
     let memory_path = config.orchestrator_dir.join("memory").join("context.md");

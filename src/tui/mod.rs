@@ -1661,18 +1661,33 @@ fn render_executing(f: &mut Frame, exec: &ExecState, area: Rect) {
 }
 
 fn render_gate(f: &mut Frame, exec: &ExecState, area: Rect) {
+    let gate_height = if exec.gate_type == "dirty_workspace" {
+        14
+    } else {
+        9
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(5)])
+        .constraints([Constraint::Length(gate_height), Constraint::Min(5)])
         .split(area);
 
     let preview = exec.gate_content.as_deref().unwrap_or("");
-    let preview_text: String = preview.lines().take(2).collect::<Vec<_>>().join("\n");
+    let preview_limit = if exec.gate_type == "dirty_workspace" {
+        8
+    } else {
+        2
+    };
+    let preview_text: String = preview
+        .lines()
+        .take(preview_limit)
+        .collect::<Vec<_>>()
+        .join("\n");
     let gate_options = match exec.gate_type.as_str() {
         "planning" => "\n  [E] / Enter  →  Enriquecer e reexecutar este agente\n  [C]          →  Prosseguir no fluxo da rodada\n  [F]          →  Finalizar planejamento e ir para código\n  [A]          →  Abortar",
         "diff_review" => "\n  [C] / Enter  →  Aprovar diff\n  [E]          →  Enriquecer (notas para o Dev)\n  [A] / Esc    →  Rejeitar diff",
         "apply" => "\n  [C] / Enter  →  Aplicar patch ao workspace\n  [A] / Esc    →  Pular (não aplicar)",
         "inter_task" => "\n  [C] / Enter  →  Próxima tarefa\n  [E]          →  Repetir com notas\n  [A] / Esc    →  Encerrar Dev Mode",
+        "dirty_workspace" => "\n  [C] / Enter  →  Verificar novamente após limpar\n  [A] / Esc    →  Abortar Modo Dev",
         "error" => "\n  [C] / Enter  →  Continuar mesmo assim (cuidado)\n  [A] / Esc    →  Abortar tarefa",
         _ => "\n  [C] / Enter  →  Continuar\n  [A] / Esc    →  Abortar",
     };
@@ -1750,6 +1765,9 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
         }
         AppView::Gate if app.exec.gate_type == "planning" => {
             "  Enter/E: Enriquecer   C: Prosseguir   F: Código   Tab/v/↑↓: painel   y: copiar"
+        }
+        AppView::Gate if app.exec.gate_type == "dirty_workspace" => {
+            "  C/Enter: Verificar novamente   A/Esc: Abortar   Tab/v/↑↓: painel   y: copiar"
         }
         AppView::Gate => {
             "  C/Enter: Continuar   E: Enriquecer   Tab/v/↑↓: painel   y: copiar   A/Esc: Abortar"
