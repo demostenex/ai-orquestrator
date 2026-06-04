@@ -11,10 +11,22 @@ pub const MENU_LEN: usize = 6;
 
 const MENU_ITEMS: &[(&str, &str)] = &[
     ("1. Novo Plano", "Cria um novo plano com o Arquiteto"),
-    ("2. Continuar Planejamento", "Retoma uma sessão de planejamento em andamento"),
-    ("3. Executar Modo Dev", "Executa as tarefas de um plano aprovado"),
-    ("4. Abrir Dashboard", "Visualiza progresso e auditoria em tempo real"),
-    ("5. Sincronizar Histórico", "Ingere páginas do ai-memory no banco de auditoria"),
+    (
+        "2. Continuar Planejamento",
+        "Retoma uma sessão de planejamento em andamento",
+    ),
+    (
+        "3. Executar Modo Dev",
+        "Executa as tarefas de um plano aprovado",
+    ),
+    (
+        "4. Abrir Dashboard",
+        "Visualiza progresso e auditoria em tempo real",
+    ),
+    (
+        "5. AI Memory",
+        "Navega e sincroniza o banco de conhecimento do projeto",
+    ),
     ("6. Sair", "Encerra o AI Orchestrator"),
 ];
 
@@ -50,9 +62,21 @@ impl HomeState {
     }
 }
 
+impl Default for HomeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ── Render (puro — sem loop, sem raw mode) ────────────────────────────────────
 
-pub fn render(f: &mut Frame, state: &mut HomeState, summary: &ProjectSummary, memory: &str, area: Rect) {
+pub fn render(
+    f: &mut Frame,
+    state: &mut HomeState,
+    summary: &ProjectSummary,
+    memory: &str,
+    area: Rect,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -80,7 +104,9 @@ fn render_menu(f: &mut Frame, state: &mut HomeState, area: Rect) {
                 .border_style(Style::default().fg(Color::Gray))
                 .title(Span::styled(
                     " Menu ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ))
                 .title_alignment(Alignment::Center),
         )
@@ -101,11 +127,17 @@ fn render_status(f: &mut Frame, state: &mut HomeState, summary: &ProjectSummary,
         .map(|(_, d)| *d)
         .unwrap_or("");
 
-    let progress = if summary.tasks_total > 0 {
-        let pct = (summary.tasks_completed * 100) / summary.tasks_total;
-        let filled = (summary.tasks_completed * 20) / summary.tasks_total;
-        let bar: String = (0..20usize).map(|i| if i < filled { '█' } else { '░' }).collect();
-        format!("[{}] {}%  ({}/{})", bar, pct, summary.tasks_completed, summary.tasks_total)
+    let progress = if let (Some(pct), Some(filled)) = (
+        (summary.tasks_completed * 100).checked_div(summary.tasks_total),
+        (summary.tasks_completed * 20).checked_div(summary.tasks_total),
+    ) {
+        let bar: String = (0..20usize)
+            .map(|i| if i < filled { '█' } else { '░' })
+            .collect();
+        format!(
+            "[{}] {}%  ({}/{})",
+            bar, pct, summary.tasks_completed, summary.tasks_total
+        )
     } else {
         "Sem tarefas registradas".to_string()
     };
@@ -139,7 +171,9 @@ fn render_status(f: &mut Frame, state: &mut HomeState, summary: &ProjectSummary,
                 .border_style(Style::default().fg(Color::Gray))
                 .title(Span::styled(
                     " Status do Projeto ",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ))
                 .title_alignment(Alignment::Center),
         )
@@ -149,6 +183,7 @@ fn render_status(f: &mut Frame, state: &mut HomeState, summary: &ProjectSummary,
 }
 
 fn render_memory(f: &mut Frame, memory: &str, area: Rect) {
+    let memory_project = crate::core::memory::ai_memory_project_label();
     let display = if memory.trim().is_empty() {
         "Nenhuma nota carregada.\n\nPressione 'r' na Home para recarregar.".to_string()
     } else {
@@ -162,8 +197,10 @@ fn render_memory(f: &mut Frame, memory: &str, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Gray))
                 .title(Span::styled(
-                    " AI-Memory ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    format!(" AI-Memory: {} ", memory_project),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ))
                 .title_alignment(Alignment::Center),
         )

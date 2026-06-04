@@ -1,5 +1,4 @@
 pub mod cli_runner;
-pub mod stream;
 pub mod config;
 pub mod db;
 pub mod git;
@@ -8,6 +7,7 @@ pub mod memory;
 pub mod patch;
 pub mod security;
 pub mod session;
+pub mod stream;
 
 use sha2::{Digest, Sha256};
 

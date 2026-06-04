@@ -30,7 +30,7 @@ pub struct Plan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanTurn {
     pub sequence: i64,
-    pub agent: String,    // "architect" | "dev" | "human"
+    pub agent: String, // "architect" | "dev" | "human"
     pub prompt: String,
     pub content: String,
     pub timestamp: String,
@@ -78,7 +78,9 @@ pub struct AuditResponse {
 impl AuditResponse {
     pub fn validate(&self) -> SchemaResult<()> {
         if self.score > 100 {
-            return Err(ValidationError::Message("score must be between 0 and 100".into()));
+            return Err(ValidationError::Message(
+                "score must be between 0 and 100".into(),
+            ));
         }
 
         Ok(())
@@ -115,7 +117,9 @@ impl Handoff {
             return Err(ValidationError::Message("agent cannot be empty".into()));
         }
         if self.target_agent.trim().is_empty() {
-            return Err(ValidationError::Message("target_agent cannot be empty".into()));
+            return Err(ValidationError::Message(
+                "target_agent cannot be empty".into(),
+            ));
         }
         if self.step_id.trim().is_empty() {
             return Err(ValidationError::Message("step_id cannot be empty".into()));
@@ -146,13 +150,9 @@ pub enum CycleDecision {
     Proceed,
     /// Repetir exatamente a mesma tarefa (mantém in_progress no DB).
     /// O loop superior deve reutilizar o current_task e injetar as notas.
-    RepeatCurrentTask {
-        user_notes: Option<String>,
-    },
+    RepeatCurrentTask { user_notes: Option<String> },
     /// Enriquecer e repetir (decisão mais ampla).
-    EnrichAndRepeat {
-        user_notes: String,
-    },
+    EnrichAndRepeat { user_notes: String },
     /// Usuário abortou o processo.
     Abort,
 }
@@ -192,13 +192,17 @@ impl CycleState {
             return Err(ValidationError::Message("step_id cannot be empty".into()));
         }
         if self.base_commit.trim().is_empty() {
-            return Err(ValidationError::Message("base_commit cannot be empty".into()));
+            return Err(ValidationError::Message(
+                "base_commit cannot be empty".into(),
+            ));
         }
         if self.plan_hash.trim().is_empty() {
             return Err(ValidationError::Message("plan_hash cannot be empty".into()));
         }
         if self.memory_hash.trim().is_empty() {
-            return Err(ValidationError::Message("memory_hash cannot be empty".into()));
+            return Err(ValidationError::Message(
+                "memory_hash cannot be empty".into(),
+            ));
         }
 
         Ok(())

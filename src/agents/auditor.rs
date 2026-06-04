@@ -15,6 +15,7 @@ const SYSTEM_PROMPT: &str = r#"You are an AI Auditor agent. Your ONLY output mus
 }
 No markdown, no explanation, no code blocks. Raw JSON only."#;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     provider: &dyn Provider,
     step_id: &str,

@@ -44,10 +44,15 @@ pub async fn list() -> Result<()> {
     if sessions.is_empty() {
         println!("Nenhuma sessão PTY ativa registrada.");
     } else {
-        println!("{:<10} {:<20} {}", "PID", "AGENTE", "COMANDO");
-        println!("{:<10} {:<20} {}", "---", "------", "-------");
+        println!("{:<10} {:<20} COMANDO", "PID", "AGENTE");
+        println!("{:<10} {:<20} -------", "---", "------");
         for (pid, info) in sessions {
-            println!("{:<10} {:<20} {}", pid, info.agent_name, info.command.join(" "));
+            println!(
+                "{:<10} {:<20} {}",
+                pid,
+                info.agent_name,
+                info.command.join(" ")
+            );
         }
     }
     Ok(())

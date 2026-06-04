@@ -13,12 +13,24 @@ pub fn scan_diff(content: &str) -> Vec<SecurityViolation> {
         (Regex::new(r"\bapi_key\b").expect("valid regex"), "api_key"),
         (Regex::new(r"\bTOKEN\b").expect("valid regex"), "TOKEN"),
         (Regex::new(r"\btoken\b").expect("valid regex"), "token"),
-        (Regex::new(r"\bPASSWORD\b").expect("valid regex"), "PASSWORD"),
-        (Regex::new(r"\bpassword\b").expect("valid regex"), "password"),
+        (
+            Regex::new(r"\bPASSWORD\b").expect("valid regex"),
+            "PASSWORD",
+        ),
+        (
+            Regex::new(r"\bpassword\b").expect("valid regex"),
+            "password",
+        ),
         (Regex::new(r"\bSECRET\b").expect("valid regex"), "SECRET"),
         (Regex::new(r"\bsecret\b").expect("valid regex"), "secret"),
-        (Regex::new(r"\bPRIVATE_KEY\b").expect("valid regex"), "PRIVATE_KEY"),
-        (Regex::new(r"\bprivate_key\b").expect("valid regex"), "private_key"),
+        (
+            Regex::new(r"\bPRIVATE_KEY\b").expect("valid regex"),
+            "PRIVATE_KEY",
+        ),
+        (
+            Regex::new(r"\bprivate_key\b").expect("valid regex"),
+            "private_key",
+        ),
     ];
 
     let mut violations = Vec::new();

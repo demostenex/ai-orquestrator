@@ -8,13 +8,13 @@ use crate::core::session::PtySession;
 
 /// CLIs conhecidos e como passam o prompt (via stdin)
 const KNOWN_CLIS: &[(&str, &str)] = &[
-    ("gemini",   "Google Gemini CLI"),
-    ("claude",   "Anthropic Claude CLI"),
-    ("llm",      "Simon Willison's LLM CLI"),
-    ("aichat",   "aichat CLI"),
-    ("tgpt",     "tgpt CLI"),
-    ("sgpt",     "ShellGPT CLI"),
-    ("copilot",  "GitHub Copilot CLI"),
+    ("gemini", "Google Gemini CLI"),
+    ("claude", "Anthropic Claude CLI"),
+    ("llm", "Simon Willison's LLM CLI"),
+    ("aichat", "aichat CLI"),
+    ("tgpt", "tgpt CLI"),
+    ("sgpt", "ShellGPT CLI"),
+    ("copilot", "GitHub Copilot CLI"),
 ];
 
 /// Detecta quais CLIs conhecidos estão instalados no PATH.
@@ -43,9 +43,21 @@ pub fn select_cli(role: &str) -> Result<Option<String>> {
     let available = detect_available_clis();
 
     if available.is_empty() {
-        println!("{}", format!("⚠ Nenhum CLI conhecido encontrado no PATH para o papel de {role}.").yellow());
-        println!("  CLIs suportados: {}", KNOWN_CLIS.iter().map(|(c, _)| *c).collect::<Vec<_>>().join(", "));
-        println!("  Você pode digitar o comando manualmente ou pressionar Enter para usar modo manual.");
+        println!(
+            "{}",
+            format!("⚠ Nenhum CLI conhecido encontrado no PATH para o papel de {role}.").yellow()
+        );
+        println!(
+            "  CLIs suportados: {}",
+            KNOWN_CLIS
+                .iter()
+                .map(|(c, _)| *c)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        println!(
+            "  Você pode digitar o comando manualmente ou pressionar Enter para usar modo manual."
+        );
         print!("  Comando CLI para {role} (ou Enter para manual): ");
         std::io::stdout().flush()?;
         let mut input = String::new();
@@ -66,7 +78,10 @@ pub fn select_cli(role: &str) -> Result<Option<String>> {
         println!("  [{}] {} — {}", i + 1, cmd.cyan(), desc);
     }
     println!("  [{}] Outro (digitar comando)", available.len() + 1);
-    println!("  [{}] Modo manual (você cola o prompt)", available.len() + 2);
+    println!(
+        "  [{}] Modo manual (você cola o prompt)",
+        available.len() + 2
+    );
     print!("  Opção: ");
     std::io::stdout().flush()?;
 
@@ -100,13 +115,18 @@ pub fn select_cli(role: &str) -> Result<Option<String>> {
 /// Envia o prompt para o CLI via stdin e exibe a resposta em streaming (linha a linha),
 /// acumulando tudo para retornar ao final.
 /// Se `log` for Some, envia as linhas pelo canal em vez de imprimir no stdout.
-pub fn run_cli(cli_cmd: &str, prompt: &str, log: Option<crate::core::stream::LogTx>) -> Result<String> {
+pub fn run_cli(
+    cli_cmd: &str,
+    prompt: &str,
+    log: Option<crate::core::stream::LogTx>,
+) -> Result<String> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(cli_cmd)
+        .env("GEMINI_CLI_TRUST_WORKSPACE", "true")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| anyhow!("falha ao executar CLI '{cli_cmd}': {e}"))?;
 
@@ -114,8 +134,37 @@ pub fn run_cli(cli_cmd: &str, prompt: &str, log: Option<crate::core::stream::Log
         stdin.write_all(prompt.as_bytes())?;
     }
 
-    let stdout = child.stdout.take()
+    let stdout = child
+        .stdout
+        .take()
         .ok_or_else(|| anyhow!("stdout não disponível para '{cli_cmd}'"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("stderr não disponível para '{cli_cmd}'"))?;
+
+    let stderr_log = log.clone();
+    let stderr_reader = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut stderr_output = String::new();
+        for line in reader.lines().map_while(|line| line.ok()) {
+            let is_visual_warning =
+                line.contains("256-color support not detected") || line.trim().is_empty();
+            if !is_visual_warning {
+                if let Some(ref tx) = stderr_log {
+                    let _ = tx.send(crate::core::stream::LogEvent::Line(format!(
+                        "stderr: {}",
+                        line
+                    )));
+                } else {
+                    eprintln!("  {}", line);
+                }
+            }
+            stderr_output.push_str(&line);
+            stderr_output.push('\n');
+        }
+        stderr_output
+    });
 
     let reader = BufReader::new(stdout);
     let mut full_output = String::new();
@@ -131,11 +180,23 @@ pub fn run_cli(cli_cmd: &str, prompt: &str, log: Option<crate::core::stream::Log
         full_output.push('\n');
     }
 
-    let status = child.wait()
+    let status = child
+        .wait()
         .map_err(|e| anyhow!("falha aguardando CLI '{cli_cmd}': {e}"))?;
+    let stderr_output = stderr_reader
+        .join()
+        .unwrap_or_else(|_| "falha lendo stderr do CLI".to_string());
 
     if !status.success() {
-        return Err(anyhow!("CLI '{cli_cmd}' retornou exit code {}", status));
+        let stderr_msg = stderr_output.trim();
+        if stderr_msg.is_empty() {
+            return Err(anyhow!("CLI '{cli_cmd}' retornou exit code {}", status));
+        }
+        return Err(anyhow!(
+            "CLI '{cli_cmd}' retornou exit code {}: {}",
+            status,
+            stderr_msg
+        ));
     }
 
     Ok(full_output)
@@ -146,21 +207,21 @@ pub fn run_cli(cli_cmd: &str, prompt: &str, log: Option<crate::core::stream::Log
 pub fn run_cli_session(session: &mut PtySession, prompt: &str, timeout_ms: u64) -> Result<String> {
     // Envia o prompt para a sessão ativa
     session.send(prompt)?;
-    
+
     // Como CLIs de IA em PTY costumam ser iterativos, eles imprimem as respostas e depois exibem um novo
     // prompt de entrada (ex: "❯ " ou "Claude> ") aguardando o usuário.
     // Em V1, vamos ler e drenar o output periodicamente. Retornamos quando o output ficar ocioso por um
     // tempo mínimo após começar a chegar, ou se atingir um limite.
-    
+
     let mut full_output = String::new();
     let mut idle_count = 0;
     let mut wait_count = 0;
     const MAX_WAIT_CYCLES: u64 = 30; // Limite de espera (ex: 30 * timeout_ms)
-    
+
     // Loop de leitura não-bloqueante (drenagem)
     loop {
         let chunk = session.read_output(timeout_ms)?;
-        
+
         if !chunk.is_empty() {
             print!("{}", chunk.dimmed()); // Imprime chunk purificado para o usuário acompanhar
             std::io::stdout().flush().ok();
@@ -173,7 +234,7 @@ pub fn run_cli_session(session: &mut PtySession, prompt: &str, timeout_ms: u64) 
             if !full_output.is_empty() && idle_count >= 3 {
                 break;
             }
-            
+
             wait_count += 1;
             if wait_count >= MAX_WAIT_CYCLES {
                 anyhow::bail!("Timeout: IA não respondeu após {} ciclos", MAX_WAIT_CYCLES);
@@ -181,6 +242,6 @@ pub fn run_cli_session(session: &mut PtySession, prompt: &str, timeout_ms: u64) 
         }
     }
     println!(); // Quebra de linha final para a TUI do orquestrador
-    
+
     Ok(full_output)
 }

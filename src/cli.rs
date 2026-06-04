@@ -6,7 +6,11 @@ use clap::{Parser, Subcommand};
 use crate::commands;
 
 #[derive(Debug, Parser)]
-#[command(name = "ai-orchestrator", version, about = "AI multi-agent orchestrator")]
+#[command(
+    name = "ai-orchestrator",
+    version,
+    about = "AI multi-agent orchestrator"
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -91,11 +95,18 @@ pub enum PlanCommands {
     },
     #[command(about = "Continua uma sessão de planejamento interativo")]
     Continue {
-        #[arg(short, long, help = "ID do plano (se omitido, abre seletor interativo)")]
+        #[arg(
+            short,
+            long,
+            help = "ID do plano (se omitido, abre seletor interativo)"
+        )]
         plan_id: Option<String>,
         #[arg(long, help = "CLI para o agente Arquiteto (obrigatório)")]
         cli1: String,
-        #[arg(long, help = "CLI para o agente Dev (opcional; se ausente usa cli1)")]
+        #[arg(
+            long,
+            help = "CLI para o Revisor de planejamento (opcional; não implementa código)"
+        )]
         cli2: Option<String>,
         #[arg(long, default_value_t = 10, help = "Número máximo de turnos")]
         max_turns: usize,
@@ -107,10 +118,21 @@ pub async fn run() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init { force, dry_run }) => commands::init::execute(force, dry_run).await,
-        Some(Commands::Run { step, dry_run, manual, new_plan, plan }) => commands::run::execute(step, dry_run, manual, new_plan, plan).await,
+        Some(Commands::Run {
+            step,
+            dry_run,
+            manual,
+            new_plan,
+            plan,
+        }) => commands::run::execute(step, dry_run, manual, new_plan, plan).await,
         Some(Commands::Audit { patch, dry_run }) => commands::audit::execute(patch, dry_run).await,
         Some(Commands::Apply { patch, dry_run }) => commands::apply::execute(patch, dry_run).await,
-        Some(Commands::Status { json, short, history, run_id }) => commands::status::execute(json, short, history, run_id).await,
+        Some(Commands::Status {
+            json,
+            short,
+            history,
+            run_id,
+        }) => commands::status::execute(json, short, history, run_id).await,
         Some(Commands::Session { command }) => match command {
             SessionCommands::List => crate::commands::session::list().await,
             SessionCommands::Kill { pid } => crate::commands::session::kill(pid).await,

@@ -16,7 +16,8 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(model: String) -> Result<Self> {
-        let api_key = env::var("OPENAI_API_KEY").map_err(|_| ProviderError::MissingApiKey("OPENAI_API_KEY"))?;
+        let api_key = env::var("OPENAI_API_KEY")
+            .map_err(|_| ProviderError::MissingApiKey("OPENAI_API_KEY"))?;
         let endpoint = env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
 
@@ -58,10 +59,17 @@ impl Provider for OpenAiProvider {
             .with_context(|| format!("failed to call OpenAI endpoint {}", self.endpoint))?;
 
         let status = response.status();
-        let value: Value = response.json().await.context("failed to decode OpenAI response body")?;
+        let value: Value = response
+            .json()
+            .await
+            .context("failed to decode OpenAI response body")?;
 
         if !status.is_success() {
-            return Err(anyhow!("OpenAI request failed with status {}: {}", status, value));
+            return Err(anyhow!(
+                "OpenAI request failed with status {}: {}",
+                status,
+                value
+            ));
         }
 
         let text = value

@@ -25,8 +25,12 @@ pub async fn execute(patch: Option<PathBuf>, dry_run: bool) -> Result<()> {
     let patch_path = match patch {
         Some(path) if path.is_absolute() => path,
         Some(path) => config.workspace_dir.join(path),
-        None => latest_patch_file(&config.orchestrator_dir)?
-            .ok_or_else(|| anyhow!("no patch file found in {}", config.orchestrator_dir.join("patches").display()))?,
+        None => latest_patch_file(&config.orchestrator_dir)?.ok_or_else(|| {
+            anyhow!(
+                "no patch file found in {}",
+                config.orchestrator_dir.join("patches").display()
+            )
+        })?,
     };
 
     if !git::is_clean_tree(&config.workspace_dir)? {
@@ -117,7 +121,8 @@ pub async fn execute(patch: Option<PathBuf>, dry_run: bool) -> Result<()> {
         run_id: run_id.clone(),
         step_id: step_id.clone(),
         status: CycleStatus::Initialized,
-        base_commit: git::get_head_commit(&config.workspace_dir).unwrap_or_else(|_| "unknown".to_string()),
+        base_commit: git::get_head_commit(&config.workspace_dir)
+            .unwrap_or_else(|_| "unknown".to_string()),
         plan_hash: compute_sha256(&plan),
         memory_hash: compute_sha256(&memory),
         patch_file: None,
@@ -150,7 +155,13 @@ pub async fn execute(patch: Option<PathBuf>, dry_run: bool) -> Result<()> {
     let mut handoff_log = Vec::new();
     if !audit_call.parsed.approved {
         let handoff = create_auditor_to_dev_handoff(&run_id, &step_id, &audit_call.parsed);
-        save_handoff(&config.orchestrator_dir, &run_id, "auditor", "dev", &handoff)?;
+        save_handoff(
+            &config.orchestrator_dir,
+            &run_id,
+            "auditor",
+            "dev",
+            &handoff,
+        )?;
         sync_handoff_summary(&config.orchestrator_dir, &run_id, &handoff)?;
         handoff_log.push(handoff);
     }
@@ -193,7 +204,10 @@ pub async fn execute(patch: Option<PathBuf>, dry_run: bool) -> Result<()> {
         }
     );
     println!("{}", "══════════════════════════════════════".bold());
-    println!("{}", "Execute `ai-orchestrator apply` para aplicar após revisão.".yellow());
+    println!(
+        "{}",
+        "Execute `ai-orchestrator apply` para aplicar após revisão.".yellow()
+    );
 
     Ok(())
 }

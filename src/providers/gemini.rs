@@ -16,9 +16,13 @@ pub struct GeminiProvider {
 
 impl GeminiProvider {
     pub fn new(model: String) -> Result<Self> {
-        let api_key = env::var("GEMINI_API_KEY").map_err(|_| ProviderError::MissingApiKey("GEMINI_API_KEY"))?;
-        let endpoint = env::var("GEMINI_BASE_URL")
-            .unwrap_or_else(|_| format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"));
+        let api_key = env::var("GEMINI_API_KEY")
+            .map_err(|_| ProviderError::MissingApiKey("GEMINI_API_KEY"))?;
+        let endpoint = env::var("GEMINI_BASE_URL").unwrap_or_else(|_| {
+            format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            )
+        });
 
         Ok(Self {
             client: Client::new(),
@@ -62,10 +66,17 @@ impl Provider for GeminiProvider {
             .with_context(|| format!("failed to call Gemini endpoint {}", self.endpoint))?;
 
         let status = response.status();
-        let value: Value = response.json().await.context("failed to decode Gemini response body")?;
+        let value: Value = response
+            .json()
+            .await
+            .context("failed to decode Gemini response body")?;
 
         if !status.is_success() {
-            return Err(anyhow!("Gemini request failed with status {}: {}", status, value));
+            return Err(anyhow!(
+                "Gemini request failed with status {}: {}",
+                status,
+                value
+            ));
         }
 
         let text = value

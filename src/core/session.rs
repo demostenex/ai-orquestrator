@@ -35,7 +35,7 @@ impl PtySession {
 
         let child = pair.slave.spawn_command(cmd)?;
         let child_pid = child.process_id().unwrap_or(0);
-        
+
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
 
@@ -47,13 +47,15 @@ impl PtySession {
         thread::spawn(move || {
             let mut buf = [0u8; 1024];
             while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 if let Ok(mut shared_buf) = buffer_clone.lock() {
                     shared_buf.extend_from_slice(&buf[..n]);
                 }
             }
         });
-        
+
         // A sessão não fecha automaticamente quando a struct é dropada.
         // A trait portable_pty::Child afirma: "Dropping the child does not kill the process".
         // Ele sobreviverá até o kill() explícito.
@@ -75,9 +77,12 @@ impl PtySession {
 
     pub fn read_output(&mut self, timeout_ms: u64) -> Result<String> {
         thread::sleep(Duration::from_millis(timeout_ms));
-        
+
         let raw_output = {
-            let mut buf = self.output_buffer.lock().map_err(|_| anyhow!("Falha ao travar o buffer do PTY"))?;
+            let mut buf = self
+                .output_buffer
+                .lock()
+                .map_err(|_| anyhow!("Falha ao travar o buffer do PTY"))?;
             let data = buf.clone();
             buf.clear();
             data

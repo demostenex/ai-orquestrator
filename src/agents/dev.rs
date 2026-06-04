@@ -36,8 +36,8 @@ pub async fn execute(
         .await?;
 
     let clean_json = strip_json_fences(&provider_response.text);
-    let parsed: DevResponse = serde_json::from_str(clean_json)
-        .with_context(|| "failed to parse IA Dev JSON response")?;
+    let parsed: DevResponse =
+        serde_json::from_str(clean_json).with_context(|| "failed to parse IA Dev JSON response")?;
     parsed.validate()?;
 
     Ok(AgentCall {
@@ -72,46 +72,87 @@ pub fn build_user_prompt(
 pub fn build_workspace_snapshot(workspace: &std::path::Path) -> String {
     use std::fs;
 
-    let ignore = [".git", ".ai-orchestrator", "target", "node_modules", ".venv", "__pycache__"];
+    let ignore = [
+        ".git",
+        ".ai-orchestrator",
+        "target",
+        "node_modules",
+        ".venv",
+        "__pycache__",
+    ];
     let max_bytes = 64 * 1024;
     let mut out = String::new();
 
-    let Ok(entries) = fs::read_dir(workspace) else { return "(não foi possível ler o workspace)".to_string() };
+    let Ok(entries) = fs::read_dir(workspace) else {
+        return "(não foi possível ler o workspace)".to_string();
+    };
 
     let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
     paths.sort();
 
-    fn collect(base: &std::path::Path, rel: &std::path::Path, ignore: &[&str], max_bytes: usize, out: &mut String) {
+    fn collect(
+        base: &std::path::Path,
+        rel: &std::path::Path,
+        ignore: &[&str],
+        max_bytes: usize,
+        out: &mut String,
+    ) {
         let full = base.join(rel);
-        let Ok(entries) = std::fs::read_dir(&full) else { return };
+        let Ok(entries) = std::fs::read_dir(&full) else {
+            return;
+        };
         let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
         paths.sort();
         for path in paths {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if ignore.iter().any(|i| name == *i) { continue; }
+            if ignore.iter().any(|i| name == *i) {
+                continue;
+            }
             let rel_path = path.strip_prefix(base).unwrap_or(&path);
             if path.is_dir() {
                 collect(base, rel_path, ignore, max_bytes, out);
             } else if path.is_file() {
-                let Ok(meta) = std::fs::metadata(&path) else { continue };
-                if meta.len() > max_bytes as u64 { continue; }
-                let Ok(content) = std::fs::read_to_string(&path) else { continue };
-                out.push_str(&format!("### {}\n```\n{}\n```\n\n", rel_path.display(), content.trim_end()));
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if meta.len() > max_bytes as u64 {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                out.push_str(&format!(
+                    "### {}\n```\n{}\n```\n\n",
+                    rel_path.display(),
+                    content.trim_end()
+                ));
             }
         }
     }
 
     for path in &paths {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if ignore.iter().any(|i| name == *i) { continue; }
+        if ignore.iter().any(|i| name == *i) {
+            continue;
+        }
         let rel = path.strip_prefix(workspace).unwrap_or(path);
         if path.is_dir() {
             collect(workspace, rel, &ignore, max_bytes, &mut out);
         } else if path.is_file() {
-            let Ok(meta) = std::fs::metadata(path) else { continue };
-            if meta.len() > max_bytes as u64 { continue; }
-            let Ok(content) = std::fs::read_to_string(path) else { continue };
-            out.push_str(&format!("### {}\n```\n{}\n```\n\n", rel.display(), content.trim_end()));
+            let Ok(meta) = std::fs::metadata(path) else {
+                continue;
+            };
+            if meta.len() > max_bytes as u64 {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            out.push_str(&format!(
+                "### {}\n```\n{}\n```\n\n",
+                rel.display(),
+                content.trim_end()
+            ));
         }
     }
 
@@ -134,7 +175,7 @@ pub fn build_dev_task_prompt(
 ) -> String {
     let mut out = String::new();
 
-    out.push_str(&format!("## MODO DEV ORIENTADO A TAREFAS (Passo 5)\n\n"));
+    out.push_str("## MODO DEV ORIENTADO A TAREFAS (Passo 5)\n\n");
     out.push_str(&format!("Plano: {}\n\n", plan_title));
 
     // Lista de progresso com marcadores (D1)
@@ -150,15 +191,22 @@ pub fn build_dev_task_prompt(
                 _ => "⬜ pending",
             }
         };
-        let assigned = t.assigned_to.as_ref().map(|a| format!(" (@{})", a)).unwrap_or_default();
+        let assigned = t
+            .assigned_to
+            .as_ref()
+            .map(|a| format!(" (@{})", a))
+            .unwrap_or_default();
         out.push_str(&format!("- {} — {}{}\n", marker, t.description, assigned));
     }
-    out.push_str("\n");
+    out.push('\n');
 
     // Tarefa atual
     out.push_str("### TAREFA ATUAL\n\n");
     out.push_str(&format!("ID: {}\n", current_task.id));
-    out.push_str(&format!("Descrição:\n{}\n\n", current_task.description.trim()));
+    out.push_str(&format!(
+        "Descrição:\n{}\n\n",
+        current_task.description.trim()
+    ));
 
     if let Some(notes) = user_notes {
         if !notes.trim().is_empty() {
@@ -173,7 +221,9 @@ pub fn build_dev_task_prompt(
     out.push_str("- Não altere tarefas que não sejam a current.\n");
     out.push_str("- Gere apenas Unified Diff válido no campo `diff` do JSON.\n");
     out.push_str("- Respeite o plano geral e o contexto de memory.\n");
-    out.push_str("- Após aprovação da auditoria, o orquestrador marcará esta tarefa como 'done'.\n\n");
+    out.push_str(
+        "- Após aprovação da auditoria, o orquestrador marcará esta tarefa como 'done'.\n\n",
+    );
 
     out.push_str("Lembrete: sua resposta DEVE ser JSON válido conforme o system prompt (sem fences, sem texto extra).\n");
 

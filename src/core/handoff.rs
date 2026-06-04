@@ -14,7 +14,10 @@ pub fn create_dev_to_auditor_handoff(
 ) -> Handoff {
     let mut decisions = vec![format!("Patch hash: {patch_hash}")];
     if !dev_response.tests_suggested.is_empty() {
-        decisions.push(format!("Testes sugeridos: {}", dev_response.tests_suggested.join("; ")));
+        decisions.push(format!(
+            "Testes sugeridos: {}",
+            dev_response.tests_suggested.join("; ")
+        ));
     }
     Handoff {
         agent: "dev".to_string(),

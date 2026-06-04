@@ -61,7 +61,11 @@ impl Provider for AnthropicProvider {
             .context("failed to decode Anthropic response body")?;
 
         if !status.is_success() {
-            return Err(anyhow!("Anthropic request failed with status {}: {}", status, value));
+            return Err(anyhow!(
+                "Anthropic request failed with status {}: {}",
+                status,
+                value
+            ));
         }
 
         let text = value

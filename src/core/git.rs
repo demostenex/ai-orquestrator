@@ -8,7 +8,9 @@ pub fn get_head_commit(workspace: &Path) -> Result<String> {
 }
 
 pub fn is_clean_tree(workspace: &Path) -> Result<bool> {
-    Ok(run_git(workspace, &["status", "--porcelain"] )?.trim().is_empty())
+    Ok(run_git(workspace, &["status", "--porcelain"])?
+        .trim()
+        .is_empty())
 }
 
 pub fn apply_check(workspace: &Path, patch_path: &Path) -> Result<()> {

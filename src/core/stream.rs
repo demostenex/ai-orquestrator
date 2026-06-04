@@ -5,7 +5,10 @@ use std::sync::mpsc;
 pub enum LogEvent {
     Line(String),
     /// gate_type: "planning" | "diff_review" | "apply" | "inter_task" | "error"
-    GateNeeded { content: String, gate_type: String },
+    GateNeeded {
+        content: String,
+        gate_type: String,
+    },
     Done,
     Failed(String),
 }
@@ -14,6 +17,7 @@ pub enum LogEvent {
 #[derive(Debug)]
 pub enum GateDecision {
     Continue,
+    Review,
     Enrich(String), // notas humanas aplicadas antes do próximo turno
     Finalize,
     Abort,

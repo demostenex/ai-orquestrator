@@ -26,7 +26,12 @@ impl DashboardState {
         let tasks = db.get_plan_tasks(&plan_id).await?;
         let recent_events =
             Db::list_recent_events_for_plan(orchestrator_dir.clone(), plan_id.clone(), 30).await?;
-        Ok(Self { plan_id, plan_title, tasks, recent_events })
+        Ok(Self {
+            plan_id,
+            plan_title,
+            tasks,
+            recent_events,
+        })
     }
 }
 
@@ -43,7 +48,10 @@ impl DashboardUiState {
         if event_count > 0 {
             list_state.select(Some(0));
         }
-        Self { list_state, memory_content: None }
+        Self {
+            list_state,
+            memory_content: None,
+        }
     }
 
     pub fn reset(&mut self, event_count: usize) {
@@ -102,12 +110,7 @@ pub fn handle_key(key: KeyEvent, ui: &mut DashboardUiState, ds: &DashboardState)
 
 /// Renderiza o corpo do dashboard na área fornecida.
 /// Inclui mini-header de progresso + 3 colunas.
-pub fn render_body(
-    f: &mut Frame,
-    ds: &DashboardState,
-    ui: &mut DashboardUiState,
-    area: Rect,
-) {
+pub fn render_body(f: &mut Frame, ds: &DashboardState, ui: &mut DashboardUiState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -120,7 +123,11 @@ pub fn render_body(
     let progress = compute_progress(&ds.tasks);
     let header_text = format!("{}  │  {}", ds.plan_title, progress);
     let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -162,8 +169,11 @@ fn render_tasks(f: &mut Frame, tasks: &[Task], area: Rect) {
         })
         .collect();
 
-    let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Tarefas do Plano"));
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Tarefas do Plano"),
+    );
     f.render_widget(list, area);
 }
 
@@ -207,6 +217,7 @@ fn render_audit_feed(f: &mut Frame, ds: &DashboardState, ui: &mut DashboardUiSta
 }
 
 fn render_memory_panel(f: &mut Frame, ds: &DashboardState, ui: &mut DashboardUiState, area: Rect) {
+    let memory_project = crate::core::memory::ai_memory_project_label();
     let len = ds.recent_events.len();
     let selected_event = ui
         .list_state
@@ -241,7 +252,7 @@ fn render_memory_panel(f: &mut Frame, ds: &DashboardState, ui: &mut DashboardUiS
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title("Memória (AI-Memory)"),
+                .title(format!("Memória (AI-Memory: {})", memory_project)),
         )
         .wrap(Wrap { trim: true });
 
@@ -258,7 +269,9 @@ pub fn compute_progress(tasks: &[Task]) -> String {
     let completed = tasks.iter().filter(|t| t.status == "completed").count();
     let pct = (completed * 100) / total;
     let filled = (completed * 20) / total;
-    let bar: String = (0..20).map(|i| if i < filled { '█' } else { '░' }).collect();
+    let bar: String = (0..20)
+        .map(|i| if i < filled { '█' } else { '░' })
+        .collect();
     format!("[{}] {}% ({}/{})", bar, pct, completed, total)
 }
 

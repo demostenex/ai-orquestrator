@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::{params, OptionalExtension};
 
 use crate::core::compute_sha256;
 
@@ -218,6 +218,7 @@ pub struct Db {
 impl Db {
     /// Abre (ou cria) o banco em `.ai-orchestrator/history.db`.
     /// Registra o projeto pelo workspace_path e o run corrente.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         orchestrator_dir: &Path,
         workspace_path: &Path,
@@ -229,11 +230,11 @@ impl Db {
         memory_hash: &str,
     ) -> Result<Self> {
         let db_path = orchestrator_dir.join("history.db");
-        
+
         // C1: Habilitar modo WAL via with_init para propagar a todas as conexões do pool
         let manager = SqliteConnectionManager::file(&db_path)
             .with_init(|c| c.pragma_update(None, "journal_mode", "WAL"));
-        
+
         let pool = Pool::new(manager)?;
 
         let conn = pool.get()?;
@@ -281,6 +282,7 @@ impl Db {
     }
 
     /// Registra um evento na fila ordenada do run. Retorna o id do evento inserido.
+    #[allow(clippy::too_many_arguments)]
     pub async fn log_event(
         &self,
         event_type: EventType,
@@ -306,7 +308,7 @@ impl Db {
             let sequence: i64 = conn.query_row(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ?1",
                 params![rid],
-                |r| r.get(0)
+                |r| r.get(0),
             )?;
             let now = Utc::now().to_rfc3339();
             conn.execute(
@@ -314,13 +316,27 @@ impl Db {
                  (project_id, run_id, sequence, event_type, from_agent, to_agent,
                   content_summary, content_hash, enriched_by_human, human_notes, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![pid, rid, sequence, etype, from, to, summary, hash, enriched_by_human as i64, notes, now],
+                params![
+                    pid,
+                    rid,
+                    sequence,
+                    etype,
+                    from,
+                    to,
+                    summary,
+                    hash,
+                    enriched_by_human as i64,
+                    notes,
+                    now
+                ],
             )?;
             Ok(conn.last_insert_rowid())
-        }).await?
+        })
+        .await?
     }
 
     /// Registra um handoff.
+    #[allow(clippy::too_many_arguments)]
     pub async fn log_handoff(
         &self,
         from_agent: &str,
@@ -357,7 +373,8 @@ impl Db {
                 params![pid, rid, from, to, st, sum, dec, rsk, qst, fls, nxt, now],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
     /// Atualiza o status e campos finais do run corrente.
@@ -390,7 +407,8 @@ impl Db {
                 params![st, phash, approved, score, mhash, now, rid],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
     // ── Novos Métodos CRUD (Passo 1.3/1.4) ─────────────────────────────────────
@@ -411,10 +429,17 @@ impl Db {
                 params![id, pid, rid, t, now],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
-    pub async fn add_plan_turn(&self, plan_id: &str, agent: &str, prompt: &str, content: &str) -> Result<()> {
+    pub async fn add_plan_turn(
+        &self,
+        plan_id: &str,
+        agent: &str,
+        prompt: &str,
+        content: &str,
+    ) -> Result<()> {
         let pool = self.pool.clone();
         let plid = plan_id.to_string();
         let ag = agent.to_string();
@@ -426,7 +451,7 @@ impl Db {
             let sequence: i64 = conn.query_row(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM plan_turns WHERE plan_id = ?1",
                 params![plid],
-                |r| r.get(0)
+                |r| r.get(0),
             )?;
             let now = Utc::now().to_rfc3339();
             conn.execute(
@@ -435,16 +460,24 @@ impl Db {
                 params![plid, sequence, ag, p, c, now],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
-    pub async fn add_task(&self, task_id: &str, plan_id: &str, description: &str, assigned_to: Option<&str>, sequence: i64) -> Result<()> {
+    pub async fn add_task(
+        &self,
+        task_id: &str,
+        plan_id: &str,
+        description: &str,
+        assigned_to: Option<&str>,
+        sequence: i64,
+    ) -> Result<()> {
         let pool = self.pool.clone();
         let tid = task_id.to_string();
         let plid = plan_id.to_string();
         let desc = description.to_string();
         let ass = assigned_to.map(|s| s.to_string());
-        
+
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let now = Utc::now().to_rfc3339();
@@ -470,10 +503,16 @@ impl Db {
                 params![plid],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
-    pub async fn update_task_status(&self, agent_name: &str, task_id: &str, status: &str) -> Result<()> {
+    pub async fn update_task_status(
+        &self,
+        agent_name: &str,
+        task_id: &str,
+        status: &str,
+    ) -> Result<()> {
         let pool = self.pool.clone();
         let agent = agent_name.to_string();
         let tid = task_id.to_string();
@@ -481,12 +520,12 @@ impl Db {
 
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            
+
             // CA3: Validação de write_locked - Permitir somente IA Dev se bloqueado
             let is_locked: bool = conn.query_row(
                 "SELECT write_locked FROM tasks WHERE id = ?1",
                 params![tid],
-                |r| r.get::<_, i64>(0).map(|v| v != 0)
+                |r| r.get::<_, i64>(0).map(|v| v != 0),
             )?;
 
             if is_locked && agent != "dev" {
@@ -499,7 +538,8 @@ impl Db {
                 params![st, now, tid],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
     /// Reseta todas as tarefas com status 'in_progress' de um plano para 'pending'.
@@ -546,7 +586,7 @@ impl Db {
             let mut stmt = conn.prepare(
                 "SELECT id, description, status, assigned_to FROM tasks
                  WHERE plan_id = ?1 AND status = 'pending'
-                 ORDER BY sequence ASC LIMIT 1"
+                 ORDER BY sequence ASC LIMIT 1",
             )?;
             let mut rows = stmt.query(params![plid])?;
 
@@ -573,7 +613,8 @@ impl Db {
             }
 
             Ok(task_row)
-        }).await?
+        })
+        .await?
     }
 
     // CA-MD1: Métodos de leitura para exportação
@@ -585,18 +626,18 @@ impl Db {
             conn.query_row(
                 "SELECT title FROM plans WHERE id = ?1",
                 params![plid],
-                |r| r.get(0)
-            ).map_err(Into::into)
-        }).await?
+                |r| r.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .await?
     }
 
     pub async fn list_plans(&self) -> Result<Vec<crate::schemas::PlanSummary>> {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            let mut stmt = conn.prepare(
-                "SELECT id, title FROM plans ORDER BY created_at DESC"
-            )?;
+            let mut stmt = conn.prepare("SELECT id, title FROM plans ORDER BY created_at DESC")?;
             let rows = stmt.query_map([], |row| {
                 Ok(crate::schemas::PlanSummary {
                     id: row.get(0)?,
@@ -604,7 +645,8 @@ impl Db {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-        }).await?
+        })
+        .await?
     }
 
     pub async fn get_plan_tasks(&self, plan_id: &str) -> Result<Vec<crate::schemas::Task>> {
@@ -649,7 +691,12 @@ impl Db {
     }
 
     // CA-MD2: Registrar versão com hash
-    pub async fn add_plan_version(&self, plan_id: &str, content_hash: &str, notes: Option<&str>) -> Result<()> {
+    pub async fn add_plan_version(
+        &self,
+        plan_id: &str,
+        content_hash: &str,
+        notes: Option<&str>,
+    ) -> Result<()> {
         let pool = self.pool.clone();
         let plid = plan_id.to_string();
         let hash = content_hash.to_string();
@@ -663,7 +710,8 @@ impl Db {
                 params![plid, hash, nts, now],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
     // CA-MD3: Buscar último hash para detecção de conflito
@@ -708,11 +756,16 @@ impl Db {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-        }).await?
+        })
+        .await?
     }
 
     /// Lista os últimos N runs do projeto, com seus eventos resumidos.
-    pub async fn list_recent_runs(orchestrator_dir: PathBuf, workspace_path: PathBuf, limit: usize) -> Result<Vec<RunRow>> {
+    pub async fn list_recent_runs(
+        orchestrator_dir: PathBuf,
+        workspace_path: PathBuf,
+        limit: usize,
+    ) -> Result<Vec<RunRow>> {
         tokio::task::spawn_blocking(move || {
             let db_path = orchestrator_dir.join("history.db");
             if !db_path.exists() {
@@ -747,7 +800,8 @@ impl Db {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-        }).await?
+        })
+        .await?
     }
 
     /// Lista todos os eventos de um run específico (para auditoria).
@@ -779,7 +833,8 @@ impl Db {
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
-        }).await?
+        })
+        .await?
     }
 
     pub fn run_id(&self) -> &str {
@@ -801,7 +856,8 @@ impl Db {
                 params![url, event_id],
             )?;
             Ok(())
-        }).await?
+        })
+        .await?
     }
 
     /// Reconstrói um evento a partir de uma página do ai-memory.
@@ -886,7 +942,11 @@ impl Db {
                 .unwrap_or(0);
 
             let tasks_completed: i64 = conn
-                .query_row("SELECT COUNT(*) FROM tasks WHERE status = 'completed'", [], |r| r.get(0))
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE status = 'completed'",
+                    [],
+                    |r| r.get(0),
+                )
                 .unwrap_or(0);
 
             let last_run_at = conn

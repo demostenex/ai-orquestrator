@@ -70,7 +70,11 @@ pub(crate) fn now_string() -> String {
 }
 
 // CA-MD1, CA-MD2, CA-MD4: Exportador Markdown
-pub async fn export_plan_to_markdown(orchestrator_dir: &Path, db: &Db, plan_id: &str) -> Result<()> {
+pub async fn export_plan_to_markdown(
+    orchestrator_dir: &Path,
+    db: &Db,
+    plan_id: &str,
+) -> Result<()> {
     let title = db.get_plan_title(plan_id).await?;
     let tasks = db.get_plan_tasks(plan_id).await?;
 
@@ -90,7 +94,11 @@ pub async fn export_plan_to_markdown(orchestrator_dir: &Path, db: &Db, plan_id: 
                 "blocked" => "[!]",
                 _ => "[ ]",
             };
-            let assigned = task.assigned_to.as_ref().map(|a| format!(" (@{})", a)).unwrap_or_default();
+            let assigned = task
+                .assigned_to
+                .as_ref()
+                .map(|a| format!(" (@{})", a))
+                .unwrap_or_default();
             content.push_str(&format!("- {} {}{}\n", mark, task.description, assigned));
         }
     }
@@ -99,7 +107,8 @@ pub async fn export_plan_to_markdown(orchestrator_dir: &Path, db: &Db, plan_id: 
 
     // Gerar e salvar hash antes de escrever o arquivo (CA-MD2)
     let hash = crate::core::compute_sha256(&content);
-    db.add_plan_version(plan_id, &hash, Some("Auto-export")).await?;
+    db.add_plan_version(plan_id, &hash, Some("Auto-export"))
+        .await?;
 
     let path = orchestrator_dir.join("plan.md");
     write_string(&path, &content)?;
@@ -107,7 +116,11 @@ pub async fn export_plan_to_markdown(orchestrator_dir: &Path, db: &Db, plan_id: 
 }
 
 // CA-MD3: Detector de Conflito
-pub async fn verify_plan_integrity(orchestrator_dir: &Path, db: &Db, plan_id: &str) -> Result<bool> {
+pub async fn verify_plan_integrity(
+    orchestrator_dir: &Path,
+    db: &Db,
+    plan_id: &str,
+) -> Result<bool> {
     let path = orchestrator_dir.join("plan.md");
     if !path.exists() {
         return Ok(true); // Se não existe, não há conflito de edição
@@ -128,16 +141,21 @@ pub async fn verify_plan_integrity(orchestrator_dir: &Path, db: &Db, plan_id: &s
 fn print_content_preview(content: &str, max_lines: usize) {
     let lines: Vec<&str> = content.lines().collect();
     let shown = lines.len().min(max_lines);
-    
+
     // B1: Detecção estrita de Unified Diff para evitar falsos positivos com Markdown
     let is_diff = (content.contains("\n--- ") || content.starts_with("--- "))
         && (content.contains("\n+++ ") || content.starts_with("+++ "))
         && content.contains("\n@@");
-        
-    let mut in_diff_block = is_diff && (content.starts_with("--- ") || content.starts_with("+++ ") || content.starts_with("@@"));
+
+    let mut in_diff_block = is_diff
+        && (content.starts_with("--- ")
+            || content.starts_with("+++ ")
+            || content.starts_with("@@"));
 
     for line in &lines[..shown] {
-        if is_diff && (line.starts_with("--- ") || line.starts_with("+++ ") || *line == "--- DIFF ---") {
+        if is_diff
+            && (line.starts_with("--- ") || line.starts_with("+++ ") || *line == "--- DIFF ---")
+        {
             in_diff_block = true;
         }
 
@@ -191,7 +209,8 @@ pub(crate) async fn interactive_gate(
         inquire::Select::new("Selecione uma ação:", options)
             .with_help_message("Use as setas para navegar e Enter para confirmar")
             .prompt()
-    }).await??;
+    })
+    .await??;
 
     match selection {
         "Seguir (Aprovar) ✅" => {
@@ -203,10 +222,14 @@ pub(crate) async fn interactive_gate(
                 inquire::Text::new("Digite suas notas (ou deixe vazio para cancelar):")
                     .with_help_message("Estas notas serão injetadas no contexto da próxima IA")
                     .prompt()
-            }).await??;
+            })
+            .await??;
 
             if notes.trim().is_empty() {
-                println!(" {} Nenhuma nota adicionada. Prosseguindo...\n", "⚠".yellow());
+                println!(
+                    " {} Nenhuma nota adicionada. Prosseguindo...\n",
+                    "⚠".yellow()
+                );
                 Ok(content.to_string())
             } else {
                 println!(" {} Notas adicionadas ao contexto.", "✔".green());
@@ -244,9 +267,9 @@ pub async fn interactive_plan_gate(
     ];
 
     let selection = tokio::task::spawn_blocking(move || {
-        inquire::Select::new("Selecione uma ação:", options)
-            .prompt()
-    }).await??;
+        inquire::Select::new("Selecione uma ação:", options).prompt()
+    })
+    .await??;
 
     match selection {
         "Seguir (Aprovar) ✅" => Ok(plan_content.to_string()),
@@ -258,11 +281,23 @@ pub async fn interactive_plan_gate(
             }).await??;
 
             if notes.trim().is_empty() {
-                println!(" {} Nenhuma instrução adicionada. Prosseguindo...\n", "⚠".yellow());
+                println!(
+                    " {} Nenhuma instrução adicionada. Prosseguindo...\n",
+                    "⚠".yellow()
+                );
                 Ok(plan_content.to_string())
             } else {
-                db.add_plan_turn(plan_id, "human", "Enriquecimento manual via portão do plano", &notes).await?;
-                println!(" {} Instruções adicionadas ao contexto da próxima IA.", "✔".green());
+                db.add_plan_turn(
+                    plan_id,
+                    "human",
+                    "Enriquecimento manual via portão do plano",
+                    &notes,
+                )
+                .await?;
+                println!(
+                    " {} Instruções adicionadas ao contexto da próxima IA.",
+                    "✔".green()
+                );
                 Ok(format!("{plan_content}\n\n[NOTAS DO HUMANO]\n{notes}"))
             }
         }
@@ -282,7 +317,7 @@ pub(crate) async fn wait_for_file(path: &Path, max_wait_secs: u64) -> Result<()>
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
         elapsed += 2;
-        if elapsed % 10 == 0 {
+        if elapsed.is_multiple_of(10) {
             println!(
                 "{} aguardando {} ({elapsed}s)...",
                 "⏳".yellow(),
@@ -432,12 +467,18 @@ pub async fn interactive_inter_task_gate(
         "Repetir esta tarefa 🔄" => {
             let notes = tokio::task::spawn_blocking(|| {
                 inquire::Text::new("Notas para repetir a tarefa (opcional):")
-                    .with_help_message("Estas notas serão injetadas no próximo prompt da mesma tarefa")
+                    .with_help_message(
+                        "Estas notas serão injetadas no próximo prompt da mesma tarefa",
+                    )
                     .prompt()
             })
             .await??;
 
-            let notes = if notes.trim().is_empty() { None } else { Some(notes) };
+            let notes = if notes.trim().is_empty() {
+                None
+            } else {
+                Some(notes)
+            };
 
             println!(" {} Repetindo a mesma tarefa...\n", "🔄".yellow());
             Ok(CycleDecision::RepeatCurrentTask { user_notes: notes })
@@ -452,7 +493,10 @@ pub async fn interactive_inter_task_gate(
             .await??;
 
             if notes.trim().is_empty() {
-                println!(" {} Nenhuma nota adicionada. Prosseguindo com repetição simples...\n", "⚠".yellow());
+                println!(
+                    " {} Nenhuma nota adicionada. Prosseguindo com repetição simples...\n",
+                    "⚠".yellow()
+                );
                 Ok(CycleDecision::RepeatCurrentTask { user_notes: None })
             } else {
                 println!(" {} Repetindo com enriquecimento...\n", "✏️".cyan());

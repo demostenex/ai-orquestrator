@@ -5,7 +5,9 @@ use std::path::Path;
 use uuid::Uuid;
 
 use crate::cli::PlanCommands;
-use crate::commands::{export_plan_to_markdown, interactive_gate, interactive_plan_gate, print_success, print_warning};
+use crate::commands::{
+    export_plan_to_markdown, interactive_gate, interactive_plan_gate, print_success, print_warning,
+};
 use crate::core::cli_runner::run_cli;
 use crate::core::config::Config;
 use crate::core::db::Db;
@@ -16,9 +18,12 @@ pub async fn execute(command: PlanCommands) -> Result<()> {
     match command {
         PlanCommands::New { title } => new_plan(title).await,
         PlanCommands::Finalize { plan_id } => finalize_plan(plan_id).await,
-        PlanCommands::Continue { plan_id, cli1, cli2, max_turns } => {
-            continue_plan(plan_id, cli1, cli2, max_turns).await
-        }
+        PlanCommands::Continue {
+            plan_id,
+            cli1,
+            cli2,
+            max_turns,
+        } => continue_plan(plan_id, cli1, cli2, max_turns).await,
     }
 }
 
@@ -69,12 +74,23 @@ async fn new_plan(title: Option<String>) -> Result<()> {
     // Exporta o plan.md inicial (vazio por enquanto)
     export_plan_to_markdown(&config.orchestrator_dir, &db, &plan_id).await?;
 
-    print_success(&format!("Plano criado com sucesso!"));
+    print_success("Plano criado com sucesso!");
     println!("  ID do plano : {}", plan_id.cyan());
     println!("  Título      : {}", plan_title);
-    println!("  Arquivo     : {}", config.orchestrator_dir.join("plan.md").display().to_string().cyan());
+    println!(
+        "  Arquivo     : {}",
+        config
+            .orchestrator_dir
+            .join("plan.md")
+            .display()
+            .to_string()
+            .cyan()
+    );
     println!();
-    println!("Use {} para começar a interagir com o plano.", "ai-orchestrator plan continue".yellow());
+    println!(
+        "Use {} para começar a interagir com o plano.",
+        "ai-orchestrator plan continue".yellow()
+    );
 
     Ok(())
 }
@@ -107,7 +123,14 @@ pub fn build_planning_prompt(turns: &[crate::schemas::PlanTurn], role: &str) -> 
     prompt.push_str("Sua tarefa agora:\n");
     prompt.push_str("- Analise cuidadosamente o histórico acima.\n");
     prompt.push_str("- Contribua de forma estruturada e útil de acordo com seu papel.\n");
-    prompt.push_str("- Mantenha o foco no planejamento de alto nível (arquitetura, tarefas, decisões).\n\n");
+    prompt.push_str(
+        "- Mantenha o foco no planejamento de alto nível (arquitetura, tarefas, decisões).\n\n",
+    );
+    prompt
+        .push_str("- Não escreva código de implementação, não gere diff e não aplique mudanças.\n");
+    prompt.push_str(
+        "- Se faltar contexto humano, peça esclarecimento ou proponha perguntas objetivas.\n\n",
+    );
 
     prompt
 }
@@ -117,6 +140,7 @@ pub fn build_planning_prompt(turns: &[crate::schemas::PlanTurn], role: &str) -> 
 /// 2. Monta o prompt via build_planning_prompt
 /// 3. Chama o CLI (via run_cli simples)
 /// 4. Persiste o resultado via add_plan_turn
+///
 /// Retorna o PlanTurn recém-criado.
 pub async fn run_planning_turn(
     db: &Db,
@@ -158,12 +182,14 @@ pub async fn run_planning_turn(
 
 /// Executa o loop completo de planejamento interativo.
 /// Alterna entre os agentes fornecidos até atingir `max_turns` ou o usuário abortar/finalizar no gate.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_planning_loop(
     db: &Db,
     orchestrator_dir: &Path,
     plan_id: &str,
     agents: &[(&str, &str, &str)], // (agent, role, cli_name)
     max_turns: usize,
+    initial_human_notes: Option<&str>,
     log: Option<crate::core::stream::LogTx>,
     gate_rx: Option<crate::core::stream::GateRx>,
 ) -> Result<()> {
@@ -179,10 +205,36 @@ pub async fn run_planning_loop(
         }
     };
 
-    for turn_index in 0..max_turns {
-        let (agent, role, cli_name) = agents[turn_index % agents.len()];
+    if let Some(notes) = initial_human_notes
+        .map(str::trim)
+        .filter(|notes| !notes.is_empty())
+    {
+        if db.get_plan_turns(plan_id).await?.is_empty() {
+            db.add_plan_turn(
+                plan_id,
+                "human",
+                "Briefing inicial do humano antes de qualquer agente",
+                notes,
+            )
+            .await?;
+            log_line("🧭 Briefing humano inicial registrado no plano.".to_string());
+        }
+    }
 
-        log_line(format!("══ TURNO {} | {} ({}) ══", turn_index + 1, agent, role));
+    let architect_idx = 0usize;
+    let reviewer_idx = if agents.len() > 1 { Some(1usize) } else { None };
+    let mut next_agent_idx = architect_idx;
+
+    for turn_index in 0..max_turns {
+        let (agent, role, cli_name) = agents[next_agent_idx];
+        next_agent_idx = architect_idx;
+
+        log_line(format!(
+            "══ TURNO {} | {} ({}) ══",
+            turn_index + 1,
+            agent,
+            role
+        ));
 
         let turn = run_planning_turn(db, plan_id, agent, role, cli_name, log.clone()).await?;
 
@@ -194,18 +246,45 @@ pub async fn run_planning_loop(
             });
             match rx.recv() {
                 Ok(crate::core::stream::GateDecision::Continue) => {
-                    log_line(" ✔ Turno aprovado. Avançando...".to_string());
+                    log_line(" ✅ Planejamento congelado pelo usuário.".to_string());
+                    db.lock_plan_tasks(plan_id).await.ok();
+                    let config = crate::core::config::Config::load()?;
+                    crate::commands::export_plan_to_markdown(&config.orchestrator_dir, db, plan_id)
+                        .await
+                        .ok();
+                    log_line(" ✅ Planejamento finalizado e exportado.".to_string());
+                    return Ok(());
+                }
+                Ok(crate::core::stream::GateDecision::Review) => {
+                    if let Some(idx) = reviewer_idx {
+                        next_agent_idx = idx;
+                        log_line(" 🔎 Enviando próximo turno ao Revisor...".to_string());
+                    } else {
+                        log_line(
+                            " ⚠ Nenhum Revisor configurado. Voltando ao Arquiteto...".to_string(),
+                        );
+                    }
                 }
                 Ok(crate::core::stream::GateDecision::Enrich(notes)) => {
                     let hash = crate::core::compute_sha256(&turn.content);
                     db.add_plan_version(plan_id, &hash, Some(&notes)).await.ok();
-                    log_line(format!(" ✏️ Notas aplicadas. Continuando para próximo turno..."));
+                    db.add_plan_turn(
+                        plan_id,
+                        "human",
+                        "Notas humanas adicionadas no gate de planejamento",
+                        &notes,
+                    )
+                    .await
+                    .ok();
+                    log_line(" ✏️ Notas aplicadas. Voltando ao Arquiteto...".to_string());
                 }
                 Ok(crate::core::stream::GateDecision::Finalize) => {
                     log_line(" ✅ Finalizando planejamento...".to_string());
                     db.lock_plan_tasks(plan_id).await.ok();
                     let config = crate::core::config::Config::load()?;
-                    crate::commands::export_plan_to_markdown(&config.orchestrator_dir, db, plan_id).await.ok();
+                    crate::commands::export_plan_to_markdown(&config.orchestrator_dir, db, plan_id)
+                        .await
+                        .ok();
                     log_line(" ✅ Planejamento finalizado e exportado.".to_string());
                     return Ok(());
                 }
@@ -230,7 +309,10 @@ pub async fn run_planning_loop(
         }
     }
 
-    log_line(format!("Limite de {} turnos atingido. Planejamento encerrado.", max_turns));
+    log_line(format!(
+        "Limite de {} turnos atingido. Planejamento encerrado.",
+        max_turns
+    ));
     Ok(())
 }
 
@@ -264,17 +346,16 @@ pub async fn finalize_plan(plan_id: String) -> Result<()> {
     );
 
     // Gate de confirmação humana (obrigatório)
-    let confirmation = interactive_gate(
-        "Finalizar Planejamento",
-        &summary,
-        "Humano → Sistema",
-    )
-    .await?;
+    let _confirmation =
+        interactive_gate("Finalizar Planejamento", &summary, "Humano → Sistema").await?;
 
     // Se o usuário abortou, o interactive_gate já retorna erro
     // Se chegou aqui, foi confirmado
 
-    println!("\n{} Confirmado. Finalizando planejamento...\n", "✔".green());
+    println!(
+        "\n{} Confirmado. Finalizando planejamento...\n",
+        "✔".green()
+    );
 
     // Ativa o lock (só aqui, após confirmação explícita)
     db.lock_plan_tasks(&plan_id).await?;
@@ -286,8 +367,19 @@ pub async fn finalize_plan(plan_id: String) -> Result<()> {
     println!("  ID do plano     : {}", plan_id.cyan());
     println!("  Título          : {}", title);
     println!("  Tarefas         : {}", tasks.len());
-    println!("  write_locked    : {}", "ativado em todas as tarefas".green());
-    println!("  Arquivo gerado  : {}", config.orchestrator_dir.join("plan.md").display().to_string().cyan());
+    println!(
+        "  write_locked    : {}",
+        "ativado em todas as tarefas".green()
+    );
+    println!(
+        "  Arquivo gerado  : {}",
+        config
+            .orchestrator_dir
+            .join("plan.md")
+            .display()
+            .to_string()
+            .cyan()
+    );
     println!();
     println!("O todo list agora está bloqueado para edição por agentes que não sejam 'dev'.");
 
@@ -310,7 +402,10 @@ pub async fn finalize_plan(plan_id: String) -> Result<()> {
         ])
         .output()
     {
-        print_warning(&format!("Não foi possível sincronizar com ai-memory: {}", e));
+        print_warning(&format!(
+            "Não foi possível sincronizar com ai-memory: {}",
+            e
+        ));
     }
 
     Ok(())
@@ -341,7 +436,9 @@ async fn continue_plan(
 
             let plans = db.list_plans().await?;
             if plans.is_empty() {
-                return Err(anyhow!("Nenhum plano encontrado. Use 'ai-orchestrator plan new' primeiro."));
+                return Err(anyhow!(
+                    "Nenhum plano encontrado. Use 'ai-orchestrator plan new' primeiro."
+                ));
             }
 
             let options: Vec<String> = plans
@@ -350,8 +447,7 @@ async fn continue_plan(
                 .collect();
 
             let selection = tokio::task::spawn_blocking(move || {
-                inquire::Select::new("Selecione o plano para continuar:", options)
-                    .prompt()
+                inquire::Select::new("Selecione o plano para continuar:", options).prompt()
             })
             .await??;
 
@@ -364,10 +460,10 @@ async fn continue_plan(
     };
 
     // 2. Monta a lista de agentes
-    let agents: Vec<(&str, &str, &str)> = if let Some(cli_dev) = &cli2 {
+    let agents: Vec<(&str, &str, &str)> = if let Some(cli_reviewer) = &cli2 {
         vec![
             ("architect", "Arquiteto", cli1.as_str()),
-            ("dev", "Dev", cli_dev.as_str()),
+            ("reviewer", "Revisor de Planejamento", cli_reviewer.as_str()),
         ]
     } else {
         vec![("architect", "Arquiteto", cli1.as_str())]
@@ -392,6 +488,7 @@ async fn continue_plan(
         &plan_id,
         &agents,
         max_turns,
+        None,
         None,
         None,
     )

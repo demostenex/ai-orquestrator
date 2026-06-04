@@ -5,7 +5,9 @@ use chrono::Utc;
 use colored::Colorize;
 use uuid::Uuid;
 
-use crate::commands::{print_step, print_success, print_warning, save_cycle, write_json, write_string};
+use crate::commands::{
+    print_step, print_success, print_warning, save_cycle, write_json, write_string,
+};
 use crate::core::compute_sha256;
 use crate::core::config::{detect_workspace_dir, StoredConfig};
 use crate::core::git;
@@ -63,7 +65,10 @@ pub async fn execute(force: bool, dry_run: bool) -> Result<()> {
     let stored_config = StoredConfig::default();
     write_json(&orchestrator_dir.join("config.json"), &stored_config)?;
     write_string(&orchestrator_dir.join("plan.md"), PLAN_TEMPLATE)?;
-    write_string(&orchestrator_dir.join("memory").join("context.md"), MEMORY_TEMPLATE)?;
+    write_string(
+        &orchestrator_dir.join("memory").join("context.md"),
+        MEMORY_TEMPLATE,
+    )?;
     write_json(
         &orchestrator_dir.join("memory-sync").join("last-sync.json"),
         &LastSyncState {
@@ -74,7 +79,8 @@ pub async fn execute(force: bool, dry_run: bool) -> Result<()> {
 
     let plan_hash = compute_sha256(PLAN_TEMPLATE);
     let memory_hash = compute_sha256(MEMORY_TEMPLATE);
-    let base_commit = git::get_head_commit(&workspace_dir).unwrap_or_else(|_| "unknown".to_string());
+    let base_commit =
+        git::get_head_commit(&workspace_dir).unwrap_or_else(|_| "unknown".to_string());
     let cycle = CycleState {
         run_id: Uuid::new_v4().to_string(),
         step_id: stored_config.step_id.clone(),
@@ -102,13 +108,18 @@ pub async fn execute(force: bool, dry_run: bool) -> Result<()> {
     };
     if !already_ignored {
         use std::io::Write;
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(&gitignore_path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&gitignore_path)?;
         file.write_all(entry.as_bytes())?;
         print_step("Adicionado .ai-orchestrator/ ao .gitignore");
     }
 
     if !workspace_dir.join(".git").exists() {
-        print_warning("Diretório atual não parece ser um repositório Git. Alguns comandos poderão falhar.");
+        print_warning(
+            "Diretório atual não parece ser um repositório Git. Alguns comandos poderão falhar.",
+        );
     }
 
     print_success("AI Orchestrator inicializado com sucesso.");
@@ -116,6 +127,9 @@ pub async fn execute(force: bool, dry_run: bool) -> Result<()> {
         "{}",
         "Edite .ai-orchestrator/plan.md antes de executar `ai-orchestrator run`.".green()
     );
-    println!("{}", format!("Timestamp: {}", Utc::now().to_rfc3339()).dimmed());
+    println!(
+        "{}",
+        format!("Timestamp: {}", Utc::now().to_rfc3339()).dimmed()
+    );
     Ok(())
 }

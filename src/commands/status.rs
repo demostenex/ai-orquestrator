@@ -12,7 +12,12 @@ use crate::core::handoff::load_last_handoff_with_meta;
 use crate::core::memory::load_last_sync;
 use crate::schemas::CycleStatus;
 
-pub async fn execute(as_json: bool, short: bool, history: bool, run_id: Option<String>) -> Result<()> {
+pub async fn execute(
+    as_json: bool,
+    short: bool,
+    history: bool,
+    run_id: Option<String>,
+) -> Result<()> {
     let config = match Config::load() {
         Ok(config) => config,
         Err(_) => {
@@ -31,7 +36,11 @@ pub async fn execute(as_json: bool, short: bool, history: bool, run_id: Option<S
             println!("{}", format!("TRILHA DE AUDITORIA — run {rid}").bold());
             println!("{}", "══════════════════════════════════════".bold());
             for ev in &events {
-                let enriched_marker = if ev.enriched_by_human { " [HUMANO]".yellow().to_string() } else { String::new() };
+                let enriched_marker = if ev.enriched_by_human {
+                    " [HUMANO]".yellow().to_string()
+                } else {
+                    String::new()
+                };
                 println!(
                     "  {:>3}. {} {:>20} → {:<20} {}{}",
                     ev.sequence,
@@ -54,25 +63,48 @@ pub async fn execute(as_json: bool, short: bool, history: bool, run_id: Option<S
     }
 
     if history {
-        let runs = Db::list_recent_runs(config.orchestrator_dir.clone(), config.workspace_dir.clone(), 20).await?;
+        let runs = Db::list_recent_runs(
+            config.orchestrator_dir.clone(),
+            config.workspace_dir.clone(),
+            20,
+        )
+        .await?;
         if runs.is_empty() {
             println!("Nenhum run encontrado para este projeto.");
         } else {
             println!("{}", "══════════════════════════════════════".bold());
             println!("{}", format!("HISTÓRICO — {}", runs[0].project_name).bold());
             println!("{}", "══════════════════════════════════════".bold());
-            println!("  {:>24}  {:>8}  {:>12}  {:>8}  {}",
-                "criado em", "modo", "status", "score", "run_id");
-            println!("  {}  {}  {}  {}  {}", "-".repeat(24), "-".repeat(8), "-".repeat(12), "-".repeat(8), "-".repeat(36));
+            println!(
+                "  {:>24}  {:>8}  {:>12}  {:>8}  run_id",
+                "criado em", "modo", "status", "score"
+            );
+            println!(
+                "  {}  {}  {}  {}  {}",
+                "-".repeat(24),
+                "-".repeat(8),
+                "-".repeat(12),
+                "-".repeat(8),
+                "-".repeat(36)
+            );
             for r in &runs {
                 let status_colored = match r.status.as_str() {
                     "approved" | "applied" => r.status.green().to_string(),
                     "rejected" | "security_blocked" => r.status.red().to_string(),
                     _ => r.status.normal().to_string(),
                 };
-                let score = r.audit_score.map(|s| s.to_string()).unwrap_or_else(|| "-".to_string());
-                println!("  {:>24}  {:>8}  {:>12}  {:>8}  {}",
-                    &r.created_at[..19], r.mode, status_colored, score, r.id);
+                let score = r
+                    .audit_score
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "  {:>24}  {:>8}  {:>12}  {:>8}  {}",
+                    &r.created_at[..19],
+                    r.mode,
+                    status_colored,
+                    score,
+                    r.id
+                );
             }
             println!("{}", "══════════════════════════════════════".bold());
             println!("Use --run-id <id> para ver a trilha completa de um run.");
@@ -88,9 +120,11 @@ pub async fn execute(as_json: bool, short: bool, history: bool, run_id: Option<S
     let plan_hash = compute_sha256(&plan);
     let memory_hash = compute_sha256(&memory);
     let steps_count = count_steps(&plan);
-    let branch = git::current_branch(&config.workspace_dir).unwrap_or_else(|_| "unknown".to_string());
+    let branch =
+        git::current_branch(&config.workspace_dir).unwrap_or_else(|_| "unknown".to_string());
     let clean = git::is_clean_tree(&config.workspace_dir).unwrap_or(false);
-    let last_commit = git::last_commit_summary(&config.workspace_dir).unwrap_or_else(|_| "unknown".to_string());
+    let last_commit =
+        git::last_commit_summary(&config.workspace_dir).unwrap_or_else(|_| "unknown".to_string());
     let patches = collect_patches(&config, &cycle)?;
     let last_handoff = load_last_handoff_with_meta(&config.orchestrator_dir)?;
     let last_sync = load_last_sync(&config.orchestrator_dir)?;
@@ -139,8 +173,20 @@ pub async fn execute(as_json: bool, short: bool, history: bool, run_id: Option<S
 
     if short {
         println!("status : {:?}", cycle.status);
-        println!("patch  : {}", cycle.patch_file.clone().unwrap_or_else(|| "none".to_string()));
-        println!("audit  : {}", cycle.audit_approved.map(|v| if v { "approved" } else { "rejected" }).unwrap_or("pending"));
+        println!(
+            "patch  : {}",
+            cycle
+                .patch_file
+                .clone()
+                .unwrap_or_else(|| "none".to_string())
+        );
+        println!(
+            "audit  : {}",
+            cycle
+                .audit_approved
+                .map(|v| if v { "approved" } else { "rejected" })
+                .unwrap_or("pending")
+        );
         println!("next   : {}", suggested);
         return Ok(());
     }
@@ -161,7 +207,11 @@ pub async fn execute(as_json: bool, short: bool, history: bool, run_id: Option<S
 
     println!("\nPATCHES");
     for patch in patches {
-        println!("  {} → {}", patch["file"].as_str().unwrap_or("unknown"), patch["status"].as_str().unwrap_or("unknown"));
+        println!(
+            "  {} → {}",
+            patch["file"].as_str().unwrap_or("unknown"),
+            patch["status"].as_str().unwrap_or("unknown")
+        );
     }
 
     println!("\nÚLTIMO HANDOFF");
@@ -169,26 +219,66 @@ pub async fn execute(as_json: bool, short: bool, history: bool, run_id: Option<S
         println!("  De         : {}", handoff.agent);
         println!("  Para       : {}", handoff.target_agent);
         println!("  Status     : {:?}", handoff.status);
-        println!("  Timestamp  : {}", chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339());
+        println!(
+            "  Timestamp  : {}",
+            chrono::DateTime::<chrono::Utc>::from(modified).to_rfc3339()
+        );
     } else {
         println!("  Nenhum handoff encontrado.");
     }
 
     println!("\nÚLTIMA AUDITORIA");
     if let Some(value) = last_audit {
-        let approved = value.pointer("/parsed/approved").or_else(|| value.get("approved")).and_then(|v| v.as_bool()).unwrap_or(false);
-        let score = value.pointer("/parsed/score").or_else(|| value.get("score")).and_then(|v| v.as_u64()).unwrap_or(0);
-        let problems = value.pointer("/parsed/problems").or_else(|| value.get("problems")).and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        println!("  Status     : {}", if approved { "APROVADO".green().to_string() } else { "REPROVADO".red().to_string() });
+        let approved = value
+            .pointer("/parsed/approved")
+            .or_else(|| value.get("approved"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let score = value
+            .pointer("/parsed/score")
+            .or_else(|| value.get("score"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let problems = value
+            .pointer("/parsed/problems")
+            .or_else(|| value.get("problems"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        println!(
+            "  Status     : {}",
+            if approved {
+                "APROVADO".green().to_string()
+            } else {
+                "REPROVADO".red().to_string()
+            }
+        );
         println!("  Score      : {score}");
-        println!("  Problemas  : {}", if problems.is_empty() { "Nenhum".to_string() } else { problems.into_iter().filter_map(|v| v.as_str().map(ToString::to_string)).collect::<Vec<_>>().join("; ") });
+        println!(
+            "  Problemas  : {}",
+            if problems.is_empty() {
+                "Nenhum".to_string()
+            } else {
+                problems
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            }
+        );
     } else {
         println!("  Nenhuma auditoria encontrada.");
     }
 
     println!("\nIA-MEMORY");
     println!("  Hash       : {memory_hash}");
-    println!("  Última sync: {}", last_sync.last_sync.map(|ts| ts.to_rfc3339()).unwrap_or_else(|| "never".to_string()));
+    println!(
+        "  Última sync: {}",
+        last_sync
+            .last_sync
+            .map(|ts| ts.to_rfc3339())
+            .unwrap_or_else(|| "never".to_string())
+    );
 
     println!("\n{}", "══════════════════════════════════════".bold());
     println!("Próximo passo sugerido: {}", suggested.yellow());
@@ -201,7 +291,10 @@ fn count_steps(plan: &str) -> usize {
     regex.find_iter(plan).count()
 }
 
-fn collect_patches(config: &Config, cycle: &crate::schemas::CycleState) -> Result<Vec<serde_json::Value>> {
+fn collect_patches(
+    config: &Config,
+    cycle: &crate::schemas::CycleState,
+) -> Result<Vec<serde_json::Value>> {
     let patches_dir = config.orchestrator_dir.join("patches");
     if !patches_dir.exists() {
         return Ok(vec![]);

@@ -1,0 +1,4 @@
+.ai-orchestrator/
+.ai-memory.toml
+target/
+*.diff

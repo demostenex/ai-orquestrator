@@ -45,7 +45,13 @@ impl SelectorState {
 
 // ── Render (puro — sem loop, sem raw mode) ────────────────────────────────────
 
-pub fn render(f: &mut Frame, state: &mut SelectorState, plans: &[PlanSummary], context: &str, area: Rect) {
+pub fn render(
+    f: &mut Frame,
+    state: &mut SelectorState,
+    plans: &[PlanSummary],
+    context: &str,
+    area: Rect,
+) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -64,7 +70,9 @@ pub fn render(f: &mut Frame, state: &mut SelectorState, plans: &[PlanSummary], c
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
                     " Selecionar Plano ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ))
                 .title_alignment(Alignment::Center),
         );

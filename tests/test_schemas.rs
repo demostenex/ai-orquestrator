@@ -1,4 +1,5 @@
-use ai_orchestrator::schemas::{AuditResponse, DevResponse, Handoff};
+use ai_orchestrator::schemas::{AuditResponse, CycleState, DevResponse, Handoff, HandoffStatus};
+use chrono::Utc;
 
 #[test]
 fn valid_dev_response_deserializes() {
@@ -93,4 +94,119 @@ fn handoff_with_invalid_status_fails() {
     }"#;
 
     assert!(serde_json::from_str::<Handoff>(raw).is_err());
+}
+
+// ── Expansões de schemas ──────────────────────────────────────────────────────
+
+#[test]
+fn dev_response_empty_step_id_fails_validation() {
+    let raw = r#"{
+        "step_id": "",
+        "summary": "something",
+        "files_touched": [],
+        "diff": "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new",
+        "tests_suggested": [],
+        "risks": []
+    }"#;
+    let response: DevResponse = serde_json::from_str(raw).unwrap();
+    assert!(response.validate().is_err());
+}
+
+#[test]
+fn audit_rejected_without_blocked_reason_is_valid() {
+    let raw = r#"{
+        "approved": false,
+        "score": 30,
+        "problems": ["Missing tests"],
+        "required_changes": ["Add tests"],
+        "blocked_reason": null
+    }"#;
+    let response: AuditResponse = serde_json::from_str(raw).unwrap();
+    assert!(response.validate().is_ok());
+}
+
+#[test]
+fn audit_score_zero_is_valid() {
+    let raw = r#"{
+        "approved": false,
+        "score": 0,
+        "problems": ["Everything is wrong"],
+        "required_changes": [],
+        "blocked_reason": "Total failure"
+    }"#;
+    let response: AuditResponse = serde_json::from_str(raw).unwrap();
+    assert!(response.validate().is_ok());
+}
+
+#[test]
+fn handoff_empty_agent_fails_validation() {
+    let raw = r#"{
+        "agent": "",
+        "target_agent": "auditor",
+        "step_id": "001",
+        "status": "waiting_audit",
+        "summary": "summary",
+        "decisions": [],
+        "files_touched": [],
+        "open_questions": [],
+        "risks": [],
+        "next_action": "review"
+    }"#;
+    let handoff: Handoff = serde_json::from_str(raw).unwrap();
+    assert!(handoff.validate().is_err());
+}
+
+#[test]
+fn handoff_status_serde_roundtrip() {
+    let statuses = [
+        (HandoffStatus::WaitingAudit, "waiting_audit"),
+        (HandoffStatus::Approved, "approved"),
+        (HandoffStatus::Rejected, "rejected"),
+        (HandoffStatus::ReadyForDev, "ready_for_dev"),
+        (HandoffStatus::WaitingHuman, "waiting_human"),
+    ];
+    for (variant, expected_str) in statuses {
+        let json = serde_json::to_string(&variant).unwrap();
+        assert_eq!(json, format!("\"{expected_str}\""));
+        let back: HandoffStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, variant);
+    }
+}
+
+#[test]
+fn cycle_state_empty_run_id_fails_validation() {
+    let state = CycleState {
+        run_id: "".to_string(),
+        step_id: "step-001".to_string(),
+        status: ai_orchestrator::schemas::CycleStatus::Initialized,
+        base_commit: "abc123".to_string(),
+        plan_hash: "planhash".to_string(),
+        memory_hash: "memhash".to_string(),
+        patch_file: None,
+        patch_hash: None,
+        audit_file: None,
+        audit_approved: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    assert!(state.validate().is_err());
+}
+
+#[test]
+fn cycle_state_empty_base_commit_fails_validation() {
+    let state = CycleState {
+        run_id: "run-001".to_string(),
+        step_id: "step-001".to_string(),
+        status: ai_orchestrator::schemas::CycleStatus::Initialized,
+        base_commit: "".to_string(),
+        plan_hash: "planhash".to_string(),
+        memory_hash: "memhash".to_string(),
+        patch_file: None,
+        patch_hash: None,
+        audit_file: None,
+        audit_approved: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    assert!(state.validate().is_err());
 }
