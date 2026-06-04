@@ -144,6 +144,24 @@ pub fn run_cli(
     prompt: &str,
     log: Option<crate::core::stream::LogTx>,
 ) -> Result<String> {
+    run_cli_impl(cli_cmd, prompt, log, None)
+}
+
+pub fn run_cli_in_dir(
+    cli_cmd: &str,
+    prompt: &str,
+    log: Option<crate::core::stream::LogTx>,
+    cwd: &Path,
+) -> Result<String> {
+    run_cli_impl(cli_cmd, prompt, log, Some(cwd))
+}
+
+fn run_cli_impl(
+    cli_cmd: &str,
+    prompt: &str,
+    log: Option<crate::core::stream::LogTx>,
+    cwd: Option<&Path>,
+) -> Result<String> {
     // Resolve o adapter (se for uma CLI conhecida) para aplicar env extra e,
     // ao final, limpar o stdout antes de devolver ao parser do agente.
     let adapter = crate::core::cli_adapter::adapter_for_command(cli_cmd);
@@ -175,6 +193,9 @@ pub fn run_cli(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
     if let Some(ref a) = adapter {
         for (k, v) in a.env() {
             command.env(k, v);

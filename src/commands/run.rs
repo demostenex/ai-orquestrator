@@ -10,7 +10,7 @@ use crate::commands::{
     interactive_gate, print_manual_instructions, print_step, print_success, print_warning,
     read_to_string, save_cycle, wait_for_file, write_json, write_string,
 };
-use crate::core::cli_runner::{is_cli_available, run_cli, select_cli};
+use crate::core::cli_runner::{is_cli_available, run_cli, run_cli_in_dir, select_cli};
 use crate::core::compute_sha256;
 use crate::core::config::{Config, StoredConfig};
 use crate::core::db::{Db, EventType};
@@ -29,6 +29,68 @@ use crate::schemas::{
 
 /// Timeout de espera em modo manual: 30 minutos
 const MANUAL_TIMEOUT_SECS: u64 = 1800;
+
+fn temp_dev_workspace_path(run_id: &str, task_id: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "ai-orchestrator-dev-workspace-{}-{}-{}",
+        &run_id[..8],
+        &task_id[..task_id.len().min(8)],
+        std::process::id()
+    ));
+    path
+}
+
+fn copy_workspace_for_dev(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    if dst.exists() {
+        std::fs::remove_dir_all(dst)?;
+    }
+    std::fs::create_dir_all(dst)?;
+    copy_dir_filtered(src, dst)
+}
+
+fn copy_dir_filtered(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if matches!(
+            name.as_ref(),
+            ".ai-orchestrator" | "target" | "node_modules" | ".next" | "dist"
+        ) {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(name.as_ref());
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            copy_dir_filtered(&src_path, &dst_path)?;
+        } else if ty.is_file() {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn diff_from_dev_workspace(workspace: &std::path::Path) -> Result<String> {
+    let _ = std::process::Command::new("git")
+        .args(["add", "-N", "."])
+        .current_dir(workspace)
+        .output();
+    let output = std::process::Command::new("git")
+        .args(["--no-pager", "diff", "--binary"])
+        .current_dir(workspace)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff failed in {}: {}",
+            workspace.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
 
 fn print_agent_prompt(role: &str, cli: &str, prompt: &str) {
     let sep = "══════════════════════════════════════";
@@ -1000,11 +1062,15 @@ pub async fn execute_tui(
             crate::core::stream::LineOrigin::Dev,
         );
 
+        let dev_workspace = temp_dev_workspace_path(&run_id, &task.id);
+        copy_workspace_for_dev(&config.workspace_dir, &dev_workspace)?;
+
         let raw = {
             let cli = cli_dev.clone();
             let p = final_prompt.clone();
             let tx = log_tx.clone();
-            tokio::task::spawn_blocking(move || run_cli(&cli, &p, Some(tx))).await??
+            let cwd = dev_workspace.clone();
+            tokio::task::spawn_blocking(move || run_cli_in_dir(&cli, &p, Some(tx), &cwd)).await??
         };
 
         send_agent(
@@ -1023,8 +1089,19 @@ pub async fn execute_tui(
                 }
             };
 
+        let sandbox_diff = diff_from_dev_workspace(&dev_workspace).unwrap_or_default();
+        if !sandbox_diff.trim().is_empty() {
+            send("ℹ️ Alterações diretas da IA capturadas em workspace temporário.".to_string());
+        }
+
+        let candidate_diff = if !sandbox_diff.trim().is_empty() {
+            sandbox_diff
+        } else {
+            dev_response.diff.clone()
+        };
+
         // Security scan
-        let violations = crate::core::security::scan_diff(&dev_response.diff);
+        let violations = crate::core::security::scan_diff(&candidate_diff);
         if !violations.is_empty() {
             for v in &violations {
                 send(format!("🚫 Segurança: {:?}", v));
@@ -1047,7 +1124,7 @@ pub async fn execute_tui(
         }
 
         // Parse diff
-        let parsed_diff = match crate::core::patch::parse_diff(&dev_response.diff) {
+        let parsed_diff = match crate::core::patch::parse_diff(&candidate_diff) {
             Ok(d) => d,
             Err(e) => {
                 send(format!("❌ Diff inválido: {}", e));
