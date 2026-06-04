@@ -277,16 +277,17 @@ pub async fn run_planning_loop(
         .map(str::trim)
         .filter(|notes| !notes.is_empty())
     {
-        if db.get_plan_turns(plan_id).await?.is_empty() {
-            db.add_plan_turn(
-                plan_id,
-                "human",
-                "Briefing inicial do humano antes de qualquer agente",
-                notes,
-            )
-            .await?;
-            log_line("🧭 Briefing humano inicial registrado no plano.".to_string());
-        }
+        // Sempre registra o briefing humano como um turno. Antes só gravava
+        // quando o plano estava vazio, o que descartava silenciosamente o
+        // briefing ao *continuar* um plano — deixando o histórico preso num
+        // briefing antigo/incompleto.
+        let label = if db.get_plan_turns(plan_id).await?.is_empty() {
+            "Briefing inicial do humano antes de qualquer agente"
+        } else {
+            "Briefing/contexto adicional do humano"
+        };
+        db.add_plan_turn(plan_id, "human", label, notes).await?;
+        log_line("🧭 Briefing humano registrado no plano.".to_string());
     }
 
     let architect_idx = 0usize;
