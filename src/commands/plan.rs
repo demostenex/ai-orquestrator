@@ -205,6 +205,19 @@ pub async fn run_planning_loop(
         }
     };
 
+    // Variante com origem estruturada: usada quando sabemos qual agente está
+    // emitindo a linha (ancora o pane correto no TUI sem heurística de string).
+    let log_agent_line = |msg: String, origin: crate::core::stream::LineOrigin| {
+        if let Some(ref tx) = log {
+            let _ = tx.send(crate::core::stream::LogEvent::AgentLine {
+                text: msg.clone(),
+                origin,
+            });
+        } else {
+            println!("{}", msg);
+        }
+    };
+
     if let Some(notes) = initial_human_notes
         .map(str::trim)
         .filter(|notes| !notes.is_empty())
@@ -229,12 +242,11 @@ pub async fn run_planning_loop(
         let (agent, role, cli_name) = agents[next_agent_idx];
         next_agent_idx = architect_idx;
 
-        log_line(format!(
-            "══ TURNO {} | {} ({}) ══",
-            turn_index + 1,
-            agent,
-            role
-        ));
+        let turn_header = format!("══ TURNO {} | {} ({}) ══", turn_index + 1, agent, role);
+        match crate::core::stream::LineOrigin::from_role(role) {
+            Some(origin) => log_agent_line(turn_header, origin),
+            None => log_line(turn_header),
+        }
 
         let turn = run_planning_turn(db, plan_id, agent, role, cli_name, log.clone()).await?;
 

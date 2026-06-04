@@ -11,6 +11,19 @@ pub enum AgentTerminalRole {
     Auditor,
 }
 
+impl AgentTerminalRole {
+    /// Mapeia a origem estruturada do core (`LineOrigin`) para o papel do pane.
+    pub fn from_origin(origin: crate::core::stream::LineOrigin) -> Self {
+        use crate::core::stream::LineOrigin;
+        match origin {
+            LineOrigin::Architect => Self::Architect,
+            LineOrigin::Reviewer => Self::Reviewer,
+            LineOrigin::Dev => Self::Dev,
+            LineOrigin::Auditor => Self::Auditor,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentTerminal {
     title: &'static str,

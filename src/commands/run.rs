@@ -904,6 +904,12 @@ pub async fn execute_tui(
     let send = |msg: String| {
         let _ = log_tx.send(LogEvent::Line(msg));
     };
+    // Variante com origem estruturada: ancora o pane do agente no TUI sem
+    // heurística. O stdout cru das CLIs (via run_cli) continua como `Line` e
+    // herda o último autor ancorado por aqui.
+    let send_agent = |msg: String, origin: crate::core::stream::LineOrigin| {
+        let _ = log_tx.send(LogEvent::AgentLine { text: msg, origin });
+    };
     let send_gate = |content: String, gate_type: &str| {
         let _ = log_tx.send(LogEvent::GateNeeded {
             content,
@@ -985,7 +991,10 @@ pub async fn execute_tui(
         )
         .await?;
 
-        send(format!("⏳ IA Dev ({}) trabalhando...", cli_dev));
+        send_agent(
+            format!("⏳ IA Dev ({}) trabalhando...", cli_dev),
+            crate::core::stream::LineOrigin::Dev,
+        );
 
         let raw = {
             let cli = cli_dev.clone();
@@ -994,7 +1003,10 @@ pub async fn execute_tui(
             tokio::task::spawn_blocking(move || run_cli(&cli, &p, Some(tx))).await??
         };
 
-        send("✔ Dev concluído. Processando resposta...".to_string());
+        send_agent(
+            "✔ Dev concluído. Processando resposta...".to_string(),
+            crate::core::stream::LineOrigin::Dev,
+        );
 
         // Parse e validação
         let dev_response: crate::schemas::DevResponse =
@@ -1151,7 +1163,10 @@ pub async fn execute_tui(
             )
         };
 
-        send(format!("⏳ IA Auditora ({}) trabalhando...", cli_audit));
+        send_agent(
+            format!("⏳ IA Auditora ({}) trabalhando...", cli_audit),
+            crate::core::stream::LineOrigin::Auditor,
+        );
         let raw_audit = {
             let cli = cli_audit.clone();
             let p = audit_prompt;

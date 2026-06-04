@@ -81,8 +81,22 @@ impl ExecState {
         }
     }
 
+    /// Linha de origem desconhecida: classifica por heurística de string.
     fn push_line(&mut self, line: String) {
         let role = classify_agent_line(&line);
+        self.append_line(line, role);
+    }
+
+    /// Linha cujo autor é conhecido na fonte: roteamento estruturado, sem heurística.
+    fn push_agent_line(&mut self, line: String, role: AgentTerminalRole) {
+        self.append_line(line, Some(role));
+    }
+
+    /// Núcleo comum: ancora `active_role` (quando há papel), roteia ao pane e
+    /// mantém o buffer agregado. Linhas com `role: None` herdam o `active_role`
+    /// vigente — é isso que permite ao stdout cru "grudar" no último autor
+    /// estruturado conhecido.
+    fn append_line(&mut self, line: String, role: Option<AgentTerminalRole>) {
         if let Some(role) = role {
             self.active_role = Some(role);
             if self.focused_role.is_none() {
@@ -455,6 +469,10 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                     match rx.try_recv() {
                         Ok(crate::core::stream::LogEvent::Line(s)) => {
                             app.exec.push_line(s);
+                        }
+                        Ok(crate::core::stream::LogEvent::AgentLine { text, origin }) => {
+                            app.exec
+                                .push_agent_line(text, AgentTerminalRole::from_origin(origin));
                         }
                         Ok(crate::core::stream::LogEvent::GateNeeded { content, gate_type }) => {
                             app.exec.gate_content = Some(content);
