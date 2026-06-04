@@ -295,7 +295,8 @@ pub async fn run_planning_loop(
     let mut next_agent_idx = architect_idx;
 
     for turn_index in 0..max_turns {
-        let (agent, role, cli_name) = agents[next_agent_idx];
+        let current_idx = next_agent_idx;
+        let (agent, role, cli_name) = agents[current_idx];
         next_agent_idx = architect_idx;
 
         let turn_header = format!("══ TURNO {} | {} ({}) ══", turn_index + 1, agent, role);
@@ -304,7 +305,51 @@ pub async fn run_planning_loop(
             None => log_line(turn_header),
         }
 
-        let turn = run_planning_turn(db, plan_id, agent, role, cli_name, log.clone()).await?;
+        // Resiliência: um turno que falha (429, timeout, rede) NÃO derruba a
+        // sessão. No TUI, mostra o erro e devolve o gate (tentar de novo o mesmo
+        // agente, ou abortar/finalizar). No modo CLI, propaga o erro como antes.
+        let turn = match run_planning_turn(db, plan_id, agent, role, cli_name, log.clone()).await {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!(" ⚠ Turno de {} ({}) falhou: {}", agent, role, e);
+                log_line(msg.clone());
+                let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) else {
+                    return Err(e); // modo CLI: mantém comportamento de abortar
+                };
+                let _ = tx.send(crate::core::stream::LogEvent::GateNeeded {
+                    content: format!(
+                        "{}\n\nO turno falhou. Escolha: tentar de novo o mesmo agente, ou abortar/finalizar.",
+                        msg.trim()
+                    ),
+                    gate_type: "planning".to_string(),
+                });
+                match rx.recv() {
+                    Ok(crate::core::stream::GateDecision::Abort) | Err(_) => {
+                        log_line(" 🛑 Planejamento abortado após falha de turno.".to_string());
+                        return Ok(());
+                    }
+                    Ok(crate::core::stream::GateDecision::Finalize) => {
+                        log_line(" ✅ Finalizando planejamento após falha...".to_string());
+                        db.lock_plan_tasks(plan_id).await.ok();
+                        let config = crate::core::config::Config::load()?;
+                        crate::commands::export_plan_to_markdown(
+                            &config.orchestrator_dir,
+                            db,
+                            plan_id,
+                        )
+                        .await
+                        .ok();
+                        return Ok(());
+                    }
+                    // Continue / Review / Enrich → tenta o mesmo agente de novo.
+                    Ok(_) => {
+                        next_agent_idx = current_idx;
+                        log_line(" 🔁 Tentando o turno novamente...".to_string());
+                        continue;
+                    }
+                }
+            }
+        };
 
         // Gate: TUI nativo ou inquire (modo CLI)
         if let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) {
