@@ -245,6 +245,10 @@ enum FieldKind {
     Text,
     /// Escolha de CLI de agente a partir do registro de adapters (com fallback custom).
     CliPick,
+    /// Texto longo (briefing/notas): Enter abre o `$EDITOR`. Evita a captura
+    /// inline frágil, onde quebras de linha de um paste viram Enter e pilotam o
+    /// formulário sozinhas.
+    Editor,
 }
 
 struct PromptField {
@@ -269,6 +273,14 @@ impl PromptField {
             optional,
             default: None,
             kind: FieldKind::CliPick,
+        }
+    }
+    const fn editor(label: &'static str, optional: bool) -> Self {
+        Self {
+            label,
+            optional,
+            default: None,
+            kind: FieldKind::Editor,
         }
     }
 }
@@ -326,6 +338,8 @@ struct PromptState {
     pick_index: usize,
     /// `true` quando o usuário escolheu "digitar comando" num campo CliPick.
     custom_mode: bool,
+    /// Última falha ao abrir o editor externo (mostrada no painel).
+    editor_error: Option<String>,
 }
 
 impl PromptState {
@@ -346,6 +360,7 @@ impl PromptState {
             cli_options,
             pick_index: 0,
             custom_mode: false,
+            editor_error: None,
         }
     }
 
@@ -371,10 +386,9 @@ impl PromptState {
     fn for_enrich() -> Self {
         Self::build(
             "Enriquecer Plano",
-            vec![PromptField::text(
-                "Notas para a IA (instruções de ajuste)",
+            vec![PromptField::editor(
+                "Notas para a IA (Enter abre o editor)",
                 false,
-                None,
             )],
             PromptNext::GateEnrich,
         )
@@ -397,7 +411,7 @@ impl PromptState {
             vec![
                 PromptField::cli("CLI para o Arquiteto", false),
                 PromptField::cli("CLI para o Revisor do plano (opcional)", true),
-                PromptField::text("Briefing humano inicial para o Arquiteto", false, None),
+                PromptField::editor("Briefing humano inicial para o Arquiteto (Enter abre o editor)", false),
                 PromptField::text("Máximo de turnos", false, Some("10")),
             ],
             PromptNext::ContinuePlanning { plan_id },
@@ -744,6 +758,9 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                 // Mantém o seletor consistente após remover um item.
                 app.selector = SelectorState::new(app.plans.len());
             }
+            LoopCmd::OpenEditor => {
+                open_editor_for_prompt(terminal, app)?;
+            }
             LoopCmd::ReloadDashboard => {
                 let data = DashboardState::load(
                     app.orchestrator_dir.clone(),
@@ -807,6 +824,7 @@ enum LoopCmd {
     GateDecide(crate::core::stream::GateDecision),
     LoadDashboard(String),
     DeletePlan(String),
+    OpenEditor,
     ReloadDashboard,
     LoadMemory(String),
     SaveSetup {
@@ -1018,20 +1036,44 @@ fn open_editor_for_prompt(
     )?;
     terminal.clear()?;
 
-    if let Ok(content) = edited {
-        ps.buffer = content.trim_end_matches('\n').to_string();
+    match edited {
+        Ok(content) => {
+            ps.buffer = content.trim_end_matches('\n').to_string();
+            ps.editor_error = None;
+        }
+        // Erro NÃO é mais engolido: fica visível no painel do prompt.
+        Err(e) => ps.editor_error = Some(e.to_string()),
     }
     Ok(())
 }
 
-/// Escreve `initial` num arquivo temporário, abre o `$EDITOR` (fallback nano) e
-/// devolve o conteúdo salvo. Usa `sh -c` para suportar editores com flags
-/// (ex.: `EDITOR="code --wait"`).
+/// Resolve o editor a usar. Valida que o 1º token de `$VISUAL`/`$EDITOR` existe
+/// no PATH (evita o caso `EDITOR=helix` quando o binário é `hx`); caso contrário
+/// cai para o primeiro editor conhecido disponível, **nvim primeiro**.
+fn resolve_editor() -> Result<String> {
+    for var in ["VISUAL", "EDITOR"] {
+        if let Ok(val) = std::env::var(var) {
+            let bin = val.split_whitespace().next().unwrap_or("");
+            if !bin.is_empty() && crate::core::cli_runner::is_cli_available(bin) {
+                return Ok(val);
+            }
+        }
+    }
+    for cand in ["nvim", "hx", "vim", "vi", "nano", "micro"] {
+        if crate::core::cli_runner::is_cli_available(cand) {
+            return Ok(cand.to_string());
+        }
+    }
+    Err(anyhow::anyhow!(
+        "nenhum editor encontrado (defina $EDITOR para um binário válido, ex.: nvim)"
+    ))
+}
+
+/// Escreve `initial` num arquivo temporário, abre o editor resolvido e devolve o
+/// conteúdo salvo. Usa `sh -c` para suportar editores com flags (`code --wait`).
 fn run_external_editor(initial: &str) -> Result<String> {
     use std::io::Write;
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "nano".to_string());
+    let editor = resolve_editor()?;
 
     let mut path = std::env::temp_dir();
     path.push(format!("ai-orchestrator-briefing-{}.md", std::process::id()));
@@ -1049,7 +1091,11 @@ fn run_external_editor(initial: &str) -> Result<String> {
     let _ = std::fs::remove_file(&path);
 
     if !status.success() {
-        return Err(anyhow::anyhow!("editor '{}' retornou erro", editor));
+        return Err(anyhow::anyhow!(
+            "editor '{}' falhou (exit {:?})",
+            editor,
+            status.code()
+        ));
     }
     Ok(content)
 }
@@ -1087,7 +1133,17 @@ fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
         };
     }
 
-    // Entrada de texto (campos Text, ou CliPick em modo custom).
+    // Campo de editor: Enter abre o $EDITOR (entrada confiável). Com conteúdo já
+    // capturado, Enter confirma. Ctrl+E (no event-loop) reabre a qualquer tempo.
+    if kind == FieldKind::Editor && ps.buffer.is_empty() {
+        return match key {
+            KeyCode::Enter => LoopCmd::OpenEditor,
+            KeyCode::Esc => LoopCmd::GoTo(AppView::Home),
+            _ => LoopCmd::Continue,
+        };
+    }
+
+    // Entrada de texto (campos Text/Editor com conteúdo, ou CliPick em modo custom).
     match key {
         KeyCode::Esc => LoopCmd::GoTo(AppView::Home),
         KeyCode::Backspace => {
@@ -1458,6 +1514,18 @@ fn render_prompt(f: &mut Frame, ps: &PromptState, area: Rect) {
                     ),
                     Span::styled(opt.label.clone(), style),
                 ]));
+            }
+        } else if field.kind == FieldKind::Editor && ps.buffer.is_empty() {
+            // Campo de editor vazio: orienta a abrir o editor (sem paste inline).
+            lines.push(Line::from(Span::styled(
+                "    Pressione Enter para escrever no editor (nvim/$EDITOR).",
+                Style::default().fg(Color::Cyan),
+            )));
+            if let Some(err) = &ps.editor_error {
+                lines.push(Line::from(Span::styled(
+                    format!("    ⚠ {}", err),
+                    Style::default().fg(Color::Red),
+                )));
             }
         } else {
             // Buffer de input com cursor (suporta texto multi-linha colado).
