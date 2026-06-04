@@ -581,6 +581,21 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
             continue;
         }
 
+        // Ctrl+E em campo de texto do Prompt → abre $EDITOR (entrada confiável de
+        // briefings grandes, sem depender de paste inline).
+        if key.code == KeyCode::Char('e')
+            && key
+                .modifiers
+                .contains(crossterm::event::KeyModifiers::CONTROL)
+        {
+            let in_text_field = matches!(&app.view, AppView::Prompt(ps)
+                if ps.fields[ps.current].kind != FieldKind::CliPick || ps.custom_mode);
+            if in_text_field {
+                open_editor_for_prompt(terminal, app)?;
+                continue;
+            }
+        }
+
         match dispatch_key(app, key.code) {
             LoopCmd::Continue => {}
             LoopCmd::Quit => break,
@@ -970,6 +985,73 @@ fn handle_paste(app: &mut TuiApp, data: &str) {
         let normalized = data.replace("\r\n", "\n").replace('\r', "\n");
         ps.buffer.push_str(&normalized);
     }
+}
+
+/// Suspende a TUI, abre o `$EDITOR` no buffer do campo atual e restaura a TUI
+/// com o conteúdo editado. Entrada confiável para briefings grandes — não
+/// depende de paste inline nem do suporte a bracketed paste do terminal.
+fn open_editor_for_prompt(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut TuiApp,
+) -> Result<()> {
+    let AppView::Prompt(ref mut ps) = app.view else {
+        return Ok(());
+    };
+    let initial = ps.buffer.clone();
+
+    // Suspende a TUI (sai do alternate screen / raw mode).
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )?;
+
+    let edited = run_external_editor(&initial);
+
+    // Restaura a TUI.
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste
+    )?;
+    terminal.clear()?;
+
+    if let Ok(content) = edited {
+        ps.buffer = content.trim_end_matches('\n').to_string();
+    }
+    Ok(())
+}
+
+/// Escreve `initial` num arquivo temporário, abre o `$EDITOR` (fallback nano) e
+/// devolve o conteúdo salvo. Usa `sh -c` para suportar editores com flags
+/// (ex.: `EDITOR="code --wait"`).
+fn run_external_editor(initial: &str) -> Result<String> {
+    use std::io::Write;
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "nano".to_string());
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("ai-orchestrator-briefing-{}.md", std::process::id()));
+    {
+        let mut f = std::fs::File::create(&path)?;
+        f.write_all(initial.as_bytes())?;
+    }
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} \"$0\"", editor))
+        .arg(&path)
+        .status()?;
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+
+    if !status.success() {
+        return Err(anyhow::anyhow!("editor '{}' retornou erro", editor));
+    }
+    Ok(content)
 }
 
 fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
@@ -1542,7 +1624,7 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
             if picking {
                 "  ↑↓: Navegar   Enter: Escolher   Esc: Cancelar"
             } else {
-                "  Enter: Confirmar   Backspace: Apagar   Esc: Cancelar"
+                "  Enter: Confirmar   Ctrl+E: Editor   Backspace: Apagar   Esc: Cancelar"
             }
         }
         AppView::Memory => {
