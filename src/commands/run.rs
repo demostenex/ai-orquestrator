@@ -617,6 +617,8 @@ pub async fn execute(
             "",
         )?;
 
+        crate::commands::plan::ensure_plan_has_executable_task(&temp_db, pid).await?;
+
         let reset_count = temp_db.reset_in_progress_tasks(pid).await?;
         if reset_count > 0 {
             print_warning(&format!(
@@ -950,6 +952,8 @@ pub async fn execute_tui(
         &plan_hash,
         &memory_hash,
     )?;
+
+    crate::commands::plan::ensure_plan_has_executable_task(&db, &plan_id).await?;
 
     let reset = db.reset_in_progress_tasks(&plan_id).await?;
     if reset > 0 {

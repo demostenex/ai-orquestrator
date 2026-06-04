@@ -16,6 +16,7 @@ use crate::schemas::PlanTurn;
 const MAX_HISTORY_TURNS: usize = 12;
 const MAX_TURN_CONTENT_CHARS: usize = 12_000;
 const MAX_PLANNING_PROMPT_CHARS: usize = 160_000;
+const MAX_SYNTHETIC_TASK_CHARS: usize = 8_000;
 
 /// Ponto de entrada para o subcomando `plan`.
 pub async fn execute(command: PlanCommands) -> Result<()> {
@@ -280,11 +281,47 @@ pub async fn run_planning_turn(
 }
 
 async fn finalize_planning(db: &Db, orchestrator_dir: &Path, plan_id: &str) -> Result<()> {
+    ensure_plan_has_executable_task(db, plan_id).await?;
     db.lock_plan_tasks(plan_id).await.ok();
     crate::commands::export_plan_to_markdown(orchestrator_dir, db, plan_id)
         .await
         .ok();
     Ok(())
+}
+
+pub(crate) async fn ensure_plan_has_executable_task(db: &Db, plan_id: &str) -> Result<()> {
+    if !db.get_plan_tasks(plan_id).await?.is_empty() {
+        return Ok(());
+    }
+
+    let turns = db.get_plan_turns(plan_id).await?;
+    let source = turns
+        .iter()
+        .rev()
+        .find(|turn| turn.agent != "human" && !turn.content.trim().is_empty())
+        .map(|turn| turn.content.trim())
+        .or_else(|| {
+            turns
+                .iter()
+                .rev()
+                .find(|turn| is_substantive_human_note(&turn.content))
+                .map(|turn| turn.content.trim())
+        })
+        .unwrap_or("Implementar o plano aprovado.");
+
+    let description = format!(
+        "Implementar o plano aprovado.\n\nContrato de implementação extraído do planejamento:\n{}",
+        truncate_chars(source, MAX_SYNTHETIC_TASK_CHARS)
+    );
+
+    db.add_task(
+        &format!("{}-task-001", plan_id),
+        plan_id,
+        &description,
+        Some("dev"),
+        1,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -544,6 +581,8 @@ pub async fn finalize_plan(plan_id: String) -> Result<()> {
         "✔".green()
     );
 
+    ensure_plan_has_executable_task(&db, &plan_id).await?;
+
     // Ativa o lock (só aqui, após confirmação explícita)
     db.lock_plan_tasks(&plan_id).await?;
 
@@ -722,5 +761,44 @@ mod tests {
         let prompt = build_planning_prompt(&turns, "Arquiteto");
 
         assert!(prompt.contains("[input humano vazio/minimo ignorado]"));
+    }
+
+    #[tokio::test]
+    async fn ensure_plan_has_executable_task_synthesizes_once_from_latest_agent_turn() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let orch_dir = dir.path().join(".ai-orchestrator");
+        std::fs::create_dir_all(&orch_dir).unwrap();
+        let db = Db::open(
+            &orch_dir,
+            dir.path(),
+            "run-test",
+            "step-test",
+            "planning",
+            "HEAD",
+            "",
+            "",
+        )
+        .unwrap();
+        db.create_plan("plan-test", "Teste").await.unwrap();
+        db.add_plan_turn(
+            "plan-test",
+            "architect",
+            "prompt omitted",
+            "Criar CLI Node.js que calcula Fibonacci ate 1000 usando BigInt.",
+        )
+        .await
+        .unwrap();
+
+        ensure_plan_has_executable_task(&db, "plan-test")
+            .await
+            .unwrap();
+        ensure_plan_has_executable_task(&db, "plan-test")
+            .await
+            .unwrap();
+
+        let tasks = db.get_plan_tasks("plan-test").await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].description.contains("Fibonacci"));
+        assert_eq!(tasks[0].assigned_to.as_deref(), Some("dev"));
     }
 }
