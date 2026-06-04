@@ -76,7 +76,7 @@ pub fn select_cli(role: &str) -> Result<Option<String>> {
         if !is_cli_available(trimmed) {
             return Err(anyhow!("CLI '{trimmed}' não encontrado no PATH."));
         }
-        return Ok(Some(trimmed.to_string()));
+        return Ok(Some(crate::core::cli_adapter::resolve_command(trimmed)));
     }
 
     println!("\n{}", format!("Escolha o CLI para IA {role}:").bold());
@@ -96,7 +96,7 @@ pub fn select_cli(role: &str) -> Result<Option<String>> {
     let choice: usize = input.trim().parse().unwrap_or(0);
 
     if choice >= 1 && choice <= available.len() {
-        let cmd = available[choice - 1].0.to_string();
+        let cmd = crate::core::cli_adapter::resolve_command(available[choice - 1].0);
         println!("  {} selecionado: {}", role, cmd.green());
         return Ok(Some(cmd));
     }
@@ -110,8 +110,9 @@ pub fn select_cli(role: &str) -> Result<Option<String>> {
         if !is_cli_available(&trimmed) {
             return Err(anyhow!("CLI '{trimmed}' não encontrado no PATH."));
         }
-        println!("  {} selecionado: {}", role, trimmed.green());
-        return Ok(Some(trimmed));
+        let resolved = crate::core::cli_adapter::resolve_command(&trimmed);
+        println!("  {} selecionado: {}", role, resolved.green());
+        return Ok(Some(resolved));
     }
 
     // Modo manual
@@ -126,13 +127,24 @@ pub fn run_cli(
     prompt: &str,
     log: Option<crate::core::stream::LogTx>,
 ) -> Result<String> {
-    let mut child = Command::new("sh")
+    // Resolve o adapter (se for uma CLI conhecida) para aplicar env extra e,
+    // ao final, limpar o stdout antes de devolver ao parser do agente.
+    let adapter = crate::core::cli_adapter::adapter_for_command(cli_cmd);
+
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(cli_cmd)
-        .env("GEMINI_CLI_TRUST_WORKSPACE", "true")
+        .env("GEMINI_CLI_TRUST_WORKSPACE", "true") // legado, inofensivo
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(ref a) = adapter {
+        for (k, v) in a.env() {
+            command.env(k, v);
+        }
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| anyhow!("falha ao executar CLI '{cli_cmd}': {e}"))?;
 
@@ -205,7 +217,12 @@ pub fn run_cli(
         ));
     }
 
-    Ok(full_output)
+    // Limpeza de saída específica do adapter (ex.: trim); identidade se desconhecido.
+    let output = match adapter {
+        Some(a) => a.clean_output(&full_output),
+        None => full_output,
+    };
+    Ok(output)
 }
 
 /// Envia o prompt para uma sessão PTY existente e lê a resposta até detectar que a IA parou de escrever.

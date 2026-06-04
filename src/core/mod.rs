@@ -1,3 +1,4 @@
+pub mod cli_adapter;
 pub mod cli_runner;
 pub mod config;
 pub mod db;

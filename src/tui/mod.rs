@@ -239,10 +239,70 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 // ── Prompt: coleta de campos dentro do TUI ────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldKind {
+    /// Texto livre digitado.
+    Text,
+    /// Escolha de CLI de agente a partir do registro de adapters (com fallback custom).
+    CliPick,
+}
+
 struct PromptField {
     label: &'static str,
     optional: bool,
     default: Option<&'static str>,
+    kind: FieldKind,
+}
+
+impl PromptField {
+    const fn text(label: &'static str, optional: bool, default: Option<&'static str>) -> Self {
+        Self {
+            label,
+            optional,
+            default,
+            kind: FieldKind::Text,
+        }
+    }
+    const fn cli(label: &'static str, optional: bool) -> Self {
+        Self {
+            label,
+            optional,
+            default: None,
+            kind: FieldKind::CliPick,
+        }
+    }
+}
+
+/// Uma opção no picker de CLI: rótulo + comando resolvido. `command == None`
+/// representa a entrada "digitar comando custom"; `Some("")` representa "nenhum"
+/// (campo opcional).
+#[derive(Clone)]
+struct CliOption {
+    label: String,
+    command: Option<String>,
+}
+
+/// Monta as opções do picker para um campo de CLI: adapters disponíveis no PATH,
+/// precedidos de "(nenhum)" se o campo for opcional e seguidos de "digitar comando".
+fn build_cli_options(optional: bool) -> Vec<CliOption> {
+    let mut opts = Vec::new();
+    if optional {
+        opts.push(CliOption {
+            label: "(nenhum)".to_string(),
+            command: Some(String::new()),
+        });
+    }
+    for a in crate::core::cli_adapter::available_adapters() {
+        opts.push(CliOption {
+            label: format!("{} — {}", a.id(), a.display_name()),
+            command: Some(a.command().to_string()),
+        });
+    }
+    opts.push(CliOption {
+        label: "Digitar comando…".to_string(),
+        command: None,
+    });
+    opts
 }
 
 enum PromptNext {
@@ -260,113 +320,88 @@ struct PromptState {
     buffer: String,
     collected: Vec<String>,
     next: PromptNext,
+    /// Opções do picker para o campo CliPick atual (vazio em campos de texto).
+    cli_options: Vec<CliOption>,
+    /// Índice selecionado no picker de CLI.
+    pick_index: usize,
+    /// `true` quando o usuário escolheu "digitar comando" num campo CliPick.
+    custom_mode: bool,
 }
 
 impl PromptState {
-    fn for_new_plan() -> Self {
+    /// Construtor base: inicializa o estado e já monta as opções do picker se o
+    /// primeiro campo for de CLI.
+    fn build(title: &'static str, fields: Vec<PromptField>, next: PromptNext) -> Self {
+        let cli_options = match fields.first() {
+            Some(f) if f.kind == FieldKind::CliPick => build_cli_options(f.optional),
+            _ => Vec::new(),
+        };
         Self {
-            title: "Novo Plano",
-            fields: vec![PromptField {
-                label: "Título do plano",
-                optional: false,
-                default: None,
-            }],
+            title,
+            fields,
             current: 0,
             buffer: String::new(),
             collected: Vec::new(),
-            next: PromptNext::NewPlan,
+            next,
+            cli_options,
+            pick_index: 0,
+            custom_mode: false,
         }
+    }
+
+    fn for_new_plan() -> Self {
+        Self::build(
+            "Novo Plano",
+            vec![PromptField::text("Título do plano", false, None)],
+            PromptNext::NewPlan,
+        )
     }
 
     fn for_dev(plan_id: String) -> Self {
-        Self {
-            title: "Executar Modo Dev",
-            fields: vec![
-                PromptField {
-                    label: "CLI para a IA Dev (ex: claude, gemini)",
-                    optional: false,
-                    default: None,
-                },
-                PromptField {
-                    label: "CLI para a Auditora (obrigatório)",
-                    optional: false,
-                    default: None,
-                },
+        Self::build(
+            "Executar Modo Dev",
+            vec![
+                PromptField::cli("CLI para a IA Dev", false),
+                PromptField::cli("CLI para a Auditora", false),
             ],
-            current: 0,
-            buffer: String::new(),
-            collected: Vec::new(),
-            next: PromptNext::DevMode { plan_id },
-        }
+            PromptNext::DevMode { plan_id },
+        )
     }
 
     fn for_enrich() -> Self {
-        Self {
-            title: "Enriquecer Plano",
-            fields: vec![PromptField {
-                label: "Notas para a IA (instruções de ajuste)",
-                optional: false,
-                default: None,
-            }],
-            current: 0,
-            buffer: String::new(),
-            collected: Vec::new(),
-            next: PromptNext::GateEnrich,
-        }
+        Self::build(
+            "Enriquecer Plano",
+            vec![PromptField::text(
+                "Notas para a IA (instruções de ajuste)",
+                false,
+                None,
+            )],
+            PromptNext::GateEnrich,
+        )
     }
 
     fn for_setup() -> Self {
-        Self {
-            title: "Configuração Inicial",
-            fields: vec![
-                PromptField {
-                    label: "CLI para a IA Dev (ex: claude, gemini)",
-                    optional: false,
-                    default: None,
-                },
-                PromptField {
-                    label: "CLI para a Auditora (obrigatório)",
-                    optional: false,
-                    default: None,
-                },
+        Self::build(
+            "Configuração Inicial",
+            vec![
+                PromptField::cli("CLI para a IA Dev", false),
+                PromptField::cli("CLI para a Auditora", false),
             ],
-            current: 0,
-            buffer: String::new(),
-            collected: Vec::new(),
-            next: PromptNext::Setup,
-        }
+            PromptNext::Setup,
+        )
     }
 
     fn for_continue(plan_id: String) -> Self {
-        Self {
-            title: "Continuar Planejamento",
-            fields: vec![
-                PromptField {
-                    label: "CLI para o Arquiteto (ex: claude, gemini)",
-                    optional: false,
-                    default: None,
-                },
-                PromptField {
-                    label: "CLI para o Revisor do plano (opcional; não implementa código)",
-                    optional: true,
-                    default: None,
-                },
-                PromptField {
-                    label: "Briefing humano inicial para o Arquiteto",
-                    optional: false,
-                    default: None,
-                },
-                PromptField {
-                    label: "Máximo de turnos",
-                    optional: false,
-                    default: Some("10"),
-                },
+        Self::build(
+            "Continuar Planejamento",
+            vec![
+                PromptField::cli("CLI para o Arquiteto", false),
+                PromptField::cli("CLI para o Revisor do plano (opcional)", true),
+                PromptField::text("Briefing humano inicial para o Arquiteto", false, None),
+                PromptField::text("Máximo de turnos", false, Some("10")),
             ],
-            current: 0,
-            buffer: String::new(),
-            collected: Vec::new(),
-            next: PromptNext::ContinuePlanning { plan_id },
-        }
+            PromptNext::ContinuePlanning { plan_id },
+        )
     }
 
     fn progress(&self) -> String {
@@ -941,6 +976,36 @@ fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
     let AppView::Prompt(ref mut ps) = app.view else {
         return LoopCmd::Continue;
     };
+    let kind = ps.fields[ps.current].kind;
+
+    // Picker de CLI (lista selecionável), salvo quando o usuário optou por digitar.
+    if kind == FieldKind::CliPick && !ps.custom_mode {
+        return match key {
+            KeyCode::Esc => LoopCmd::GoTo(AppView::Home),
+            KeyCode::Up => {
+                ps.pick_index = ps.pick_index.saturating_sub(1);
+                LoopCmd::Continue
+            }
+            KeyCode::Down => {
+                if ps.pick_index + 1 < ps.cli_options.len() {
+                    ps.pick_index += 1;
+                }
+                LoopCmd::Continue
+            }
+            KeyCode::Enter => match ps.cli_options[ps.pick_index].command.clone() {
+                Some(cmd) => advance_prompt(ps, cmd),
+                None => {
+                    // "Digitar comando…" → entra no modo de texto livre.
+                    ps.custom_mode = true;
+                    ps.buffer.clear();
+                    LoopCmd::Continue
+                }
+            },
+            _ => LoopCmd::Continue,
+        };
+    }
+
+    // Entrada de texto (campos Text, ou CliPick em modo custom).
     match key {
         KeyCode::Esc => LoopCmd::GoTo(AppView::Home),
         KeyCode::Backspace => {
@@ -961,59 +1026,80 @@ fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
             if ps.buffer.trim().is_empty() && !ps.fields[ps.current].optional {
                 return LoopCmd::Continue;
             }
-            ps.collected.push(ps.buffer.clone());
-            ps.buffer.clear();
-            ps.current += 1;
-
-            if ps.current < ps.fields.len() {
-                return LoopCmd::Continue; // mais campos a coletar
-            }
-
-            // Todos os campos coletados — constrói o Suspend
-            let collected = ps.collected.clone();
-            match &ps.next {
-                PromptNext::ContinuePlanning { plan_id } => {
-                    let plan_id = plan_id.clone();
-                    let cli1 = collected[0].clone();
-                    let cli2 = if collected[1].is_empty() {
-                        None
-                    } else {
-                        Some(collected[1].clone())
-                    };
-                    let initial_notes = collected[2].clone();
-                    let max_turns: usize = collected[3].parse().unwrap_or(10);
-                    LoopCmd::StartPlanning {
-                        plan_id,
-                        cli1,
-                        cli2,
-                        initial_notes,
-                        max_turns,
-                    }
-                }
-                PromptNext::NewPlan => LoopCmd::CreatePlan {
-                    title: collected[0].clone(),
-                },
-                PromptNext::GateEnrich => {
-                    use crate::core::stream::GateDecision;
-                    LoopCmd::GateDecide(GateDecision::Enrich(collected[0].clone()))
-                }
-                PromptNext::DevMode { plan_id } => {
-                    let cli_dev = collected[0].clone();
-                    let cli_audit = Some(collected[1].clone());
-                    LoopCmd::StartDev {
-                        plan_id: plan_id.clone(),
-                        cli_dev,
-                        cli_audit,
-                    }
-                }
-                PromptNext::Setup => {
-                    let dev_cli = collected[0].clone();
-                    let audit_cli = Some(collected[1].clone());
-                    LoopCmd::SaveSetup { dev_cli, audit_cli }
-                }
-            }
+            // Campo de CLI digitado à mão: expande receita conhecida (ex.: codex).
+            let value = if kind == FieldKind::CliPick {
+                crate::core::cli_adapter::resolve_command(&ps.buffer)
+            } else {
+                ps.buffer.clone()
+            };
+            advance_prompt(ps, value)
         }
         _ => LoopCmd::Continue,
+    }
+}
+
+/// Coleta o valor do campo atual, avança e — se ainda houver campos — prepara o
+/// próximo (rebuild do picker quando o próximo for CliPick). Ao coletar o último
+/// campo, constrói o `LoopCmd` correspondente ao fluxo.
+fn advance_prompt(ps: &mut PromptState, value: String) -> LoopCmd {
+    ps.collected.push(value);
+    ps.buffer.clear();
+    ps.custom_mode = false;
+    ps.pick_index = 0;
+    ps.current += 1;
+
+    if ps.current < ps.fields.len() {
+        let next_field = &ps.fields[ps.current];
+        ps.cli_options = if next_field.kind == FieldKind::CliPick {
+            build_cli_options(next_field.optional)
+        } else {
+            Vec::new()
+        };
+        return LoopCmd::Continue; // mais campos a coletar
+    }
+
+    // Todos os campos coletados — constrói o comando do fluxo.
+    let collected = ps.collected.clone();
+    match &ps.next {
+        PromptNext::ContinuePlanning { plan_id } => {
+            let plan_id = plan_id.clone();
+            let cli1 = collected[0].clone();
+            let cli2 = if collected[1].is_empty() {
+                None
+            } else {
+                Some(collected[1].clone())
+            };
+            let initial_notes = collected[2].clone();
+            let max_turns: usize = collected[3].parse().unwrap_or(10);
+            LoopCmd::StartPlanning {
+                plan_id,
+                cli1,
+                cli2,
+                initial_notes,
+                max_turns,
+            }
+        }
+        PromptNext::NewPlan => LoopCmd::CreatePlan {
+            title: collected[0].clone(),
+        },
+        PromptNext::GateEnrich => {
+            use crate::core::stream::GateDecision;
+            LoopCmd::GateDecide(GateDecision::Enrich(collected[0].clone()))
+        }
+        PromptNext::DevMode { plan_id } => {
+            let cli_dev = collected[0].clone();
+            let cli_audit = Some(collected[1].clone());
+            LoopCmd::StartDev {
+                plan_id: plan_id.clone(),
+                cli_dev,
+                cli_audit,
+            }
+        }
+        PromptNext::Setup => {
+            let dev_cli = collected[0].clone();
+            let audit_cli = Some(collected[1].clone());
+            LoopCmd::SaveSetup { dev_cli, audit_cli }
+        }
     }
 }
 
@@ -1274,31 +1360,50 @@ fn render_prompt(f: &mut Frame, ps: &PromptState, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )));
-        // Buffer de input com cursor (suporta texto multi-linha colado).
-        // Prefixo "> " na primeira linha; continuações alinhadas e indentadas.
-        let mut buf_lines = ps.buffer.split('\n');
-        let first = buf_lines.next().unwrap_or("");
-        let rest: Vec<&str> = buf_lines.collect();
-        if rest.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("    > ", Style::default().fg(Color::Cyan)),
-                Span::styled(first.to_string(), Style::default().fg(Color::White)),
-                Span::styled("█", Style::default().fg(Color::Cyan)),
-            ]));
+        if field.kind == FieldKind::CliPick && !ps.custom_mode {
+            // Picker: lista de adapters disponíveis (+ custom / nenhum).
+            for (i, opt) in ps.cli_options.iter().enumerate() {
+                let selected = i == ps.pick_index;
+                let style = if selected {
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if selected { "  ❯ " } else { "    " },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(opt.label.clone(), style),
+                ]));
+            }
         } else {
-            lines.push(Line::from(vec![
-                Span::styled("    > ", Style::default().fg(Color::Cyan)),
-                Span::styled(first.to_string(), Style::default().fg(Color::White)),
-            ]));
-            for (i, bl) in rest.iter().enumerate() {
-                let mut spans = vec![
-                    Span::styled("      ", Style::default().fg(Color::Cyan)),
-                    Span::styled(bl.to_string(), Style::default().fg(Color::White)),
-                ];
-                if i == rest.len() - 1 {
-                    spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+            // Buffer de input com cursor (suporta texto multi-linha colado).
+            // Prefixo "> " na primeira linha; continuações alinhadas e indentadas.
+            let mut buf_lines = ps.buffer.split('\n');
+            let first = buf_lines.next().unwrap_or("");
+            let rest: Vec<&str> = buf_lines.collect();
+            if rest.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("    > ", Style::default().fg(Color::Cyan)),
+                    Span::styled(first.to_string(), Style::default().fg(Color::White)),
+                    Span::styled("█", Style::default().fg(Color::Cyan)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("    > ", Style::default().fg(Color::Cyan)),
+                    Span::styled(first.to_string(), Style::default().fg(Color::White)),
+                ]));
+                for (i, bl) in rest.iter().enumerate() {
+                    let mut spans = vec![
+                        Span::styled("      ", Style::default().fg(Color::Cyan)),
+                        Span::styled(bl.to_string(), Style::default().fg(Color::White)),
+                    ];
+                    if i == rest.len() - 1 {
+                        spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+                    }
+                    lines.push(Line::from(spans));
                 }
-                lines.push(Line::from(spans));
             }
         }
     }
@@ -1428,7 +1533,18 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
         AppView::Dashboard => {
             "  ↑↓: Feed   Enter: Carregar Handoff   r: Recarregar   q/Esc: Voltar"
         }
-        AppView::Prompt(_) => "  Enter: Confirmar   Backspace: Apagar   Esc: Cancelar",
+        AppView::Prompt(ps) => {
+            let picking = ps
+                .fields
+                .get(ps.current)
+                .map(|f| f.kind == FieldKind::CliPick && !ps.custom_mode)
+                .unwrap_or(false);
+            if picking {
+                "  ↑↓: Navegar   Enter: Escolher   Esc: Cancelar"
+            } else {
+                "  Enter: Confirmar   Backspace: Apagar   Esc: Cancelar"
+            }
+        }
         AppView::Memory => {
             "  ↑↓/jk: Navegar   Enter: Ler página   s: Sincronizar   r: Refresh   q/Esc: Voltar"
         }
