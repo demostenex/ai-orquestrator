@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -443,14 +443,18 @@ pub async fn start() -> Result<()> {
     // Setup terminal — único ponto de enable/disable em toda a sessão
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_loop(&mut terminal, &mut app).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -527,7 +531,12 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
         if !event::poll(std::time::Duration::from_millis(100))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let ev = event::read()?;
+        if let Event::Paste(data) = ev {
+            handle_paste(app, &data);
+            continue;
+        }
+        let Event::Key(key) = ev else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
@@ -882,6 +891,18 @@ fn dispatch_dashboard(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
     }
 }
 
+/// Insere texto colado (bracketed paste) no campo de entrada ativo.
+/// Só o Prompt aceita texto livre — paste em outras views é ignorado de
+/// propósito (evita que colar acidentalmente acione atalhos de tecla).
+/// Sem bracketed paste, cada `\n` colado virava um Enter e submetia o campo
+/// no meio da colagem, quebrando o fluxo.
+fn handle_paste(app: &mut TuiApp, data: &str) {
+    if let AppView::Prompt(ref mut ps) = app.view {
+        let normalized = data.replace("\r\n", "\n").replace('\r', "\n");
+        ps.buffer.push_str(&normalized);
+    }
+}
+
 fn dispatch_prompt(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
     let AppView::Prompt(ref mut ps) = app.view else {
         return LoopCmd::Continue;
@@ -1142,7 +1163,10 @@ fn render_banner(f: &mut Frame, area: Rect) {
                 "  Multi-Agent Development System  ",
                 Style::default().fg(Color::Yellow),
             ),
-            Span::styled("│  v0.1.0  ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                concat!("│  v", env!("CARGO_PKG_VERSION"), "  "),
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled("│  Memória: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 memory_project,
@@ -1200,12 +1224,33 @@ fn render_prompt(f: &mut Frame, ps: &PromptState, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )));
-        // Buffer de input com cursor
-        lines.push(Line::from(vec![
-            Span::styled("    > ", Style::default().fg(Color::Cyan)),
-            Span::styled(ps.buffer.clone(), Style::default().fg(Color::White)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
-        ]));
+        // Buffer de input com cursor (suporta texto multi-linha colado).
+        // Prefixo "> " na primeira linha; continuações alinhadas e indentadas.
+        let mut buf_lines = ps.buffer.split('\n');
+        let first = buf_lines.next().unwrap_or("");
+        let rest: Vec<&str> = buf_lines.collect();
+        if rest.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("    > ", Style::default().fg(Color::Cyan)),
+                Span::styled(first.to_string(), Style::default().fg(Color::White)),
+                Span::styled("█", Style::default().fg(Color::Cyan)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("    > ", Style::default().fg(Color::Cyan)),
+                Span::styled(first.to_string(), Style::default().fg(Color::White)),
+            ]));
+            for (i, bl) in rest.iter().enumerate() {
+                let mut spans = vec![
+                    Span::styled("      ", Style::default().fg(Color::Cyan)),
+                    Span::styled(bl.to_string(), Style::default().fg(Color::White)),
+                ];
+                if i == rest.len() - 1 {
+                    spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+                }
+                lines.push(Line::from(spans));
+            }
+        }
     }
 
     let text: Vec<&Line> = lines.iter().collect();
