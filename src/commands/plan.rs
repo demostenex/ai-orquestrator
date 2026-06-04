@@ -72,12 +72,12 @@ async fn delete_plan_cmd(plan_id: String, yes: bool) -> Result<()> {
 
     let removed = db.delete_plan(&plan_id).await?;
     if removed == 0 {
-        println!("{}", format!("Plano '{}' não encontrado.", plan_id).yellow());
-    } else {
         println!(
             "{}",
-            format!("✔ Plano \"{}\" removido.", title).green()
+            format!("Plano '{}' não encontrado.", plan_id).yellow()
         );
+    } else {
+        println!("{}", format!("✔ Plano \"{}\" removido.", title).green());
     }
     Ok(())
 }
@@ -235,8 +235,24 @@ pub async fn run_planning_turn(
     })
 }
 
+async fn finalize_planning(db: &Db, orchestrator_dir: &Path, plan_id: &str) -> Result<()> {
+    db.lock_plan_tasks(plan_id).await.ok();
+    crate::commands::export_plan_to_markdown(orchestrator_dir, db, plan_id)
+        .await
+        .ok();
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanningPhaseOutcome {
+    Proceed,
+    Finalized,
+    Aborted,
+}
+
 /// Executa o loop completo de planejamento interativo.
-/// Alterna entre os agentes fornecidos até atingir `max_turns` ou o usuário abortar/finalizar no gate.
+/// `max_turns` mantém o nome público legado, mas agora representa rodadas:
+/// Arquiteto → enriquecimentos opcionais → Revisor → enriquecimentos opcionais.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_planning_loop(
     db: &Db,
@@ -290,142 +306,149 @@ pub async fn run_planning_loop(
         log_line("🧭 Briefing humano registrado no plano.".to_string());
     }
 
-    let architect_idx = 0usize;
     let reviewer_idx = if agents.len() > 1 { Some(1usize) } else { None };
-    let mut next_agent_idx = architect_idx;
 
-    for turn_index in 0..max_turns {
-        let current_idx = next_agent_idx;
-        let (agent, role, cli_name) = agents[current_idx];
-        next_agent_idx = architect_idx;
+    for round_index in 0..max_turns {
+        log_line(format!(
+            "══ RODADA {} de {} | Planejamento ══",
+            round_index + 1,
+            max_turns
+        ));
 
-        let turn_header = format!("══ TURNO {} | {} ({}) ══", turn_index + 1, agent, role);
-        match crate::core::stream::LineOrigin::from_role(role) {
-            Some(origin) => log_agent_line(turn_header, origin),
-            None => log_line(turn_header),
-        }
+        for current_idx in std::iter::once(0usize).chain(reviewer_idx) {
+            let (agent, role, cli_name) = agents[current_idx];
 
-        // Resiliência: um turno que falha (429, timeout, rede) NÃO derruba a
-        // sessão. No TUI, mostra o erro e devolve o gate (tentar de novo o mesmo
-        // agente, ou abortar/finalizar). No modo CLI, propaga o erro como antes.
-        let turn = match run_planning_turn(db, plan_id, agent, role, cli_name, log.clone()).await {
-            Ok(t) => t,
-            Err(e) => {
-                let msg = format!(" ⚠ Turno de {} ({}) falhou: {}", agent, role, e);
-                log_line(msg.clone());
-                let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) else {
-                    return Err(e); // modo CLI: mantém comportamento de abortar
-                };
-                let _ = tx.send(crate::core::stream::LogEvent::GateNeeded {
-                    content: format!(
-                        "{}\n\nO turno falhou. Escolha: tentar de novo o mesmo agente, ou abortar/finalizar.",
-                        msg.trim()
-                    ),
-                    gate_type: "planning".to_string(),
-                });
-                match rx.recv() {
-                    Ok(crate::core::stream::GateDecision::Abort) | Err(_) => {
-                        log_line(" 🛑 Planejamento abortado após falha de turno.".to_string());
-                        return Ok(());
-                    }
-                    Ok(crate::core::stream::GateDecision::Finalize) => {
-                        log_line(" ✅ Finalizando planejamento após falha...".to_string());
-                        db.lock_plan_tasks(plan_id).await.ok();
-                        let config = crate::core::config::Config::load()?;
-                        crate::commands::export_plan_to_markdown(
-                            &config.orchestrator_dir,
-                            db,
-                            plan_id,
-                        )
-                        .await
-                        .ok();
-                        return Ok(());
-                    }
-                    // Continue / Review / Enrich → tenta o mesmo agente de novo.
-                    Ok(_) => {
-                        next_agent_idx = current_idx;
-                        log_line(" 🔁 Tentando o turno novamente...".to_string());
-                        continue;
-                    }
+            loop {
+                let turn_header =
+                    format!("── RODADA {} | {} ({}) ──", round_index + 1, agent, role);
+                match crate::core::stream::LineOrigin::from_role(role) {
+                    Some(origin) => log_agent_line(turn_header, origin),
+                    None => log_line(turn_header),
                 }
-            }
-        };
 
-        // Gate: TUI nativo ou inquire (modo CLI)
-        if let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) {
-            let _ = tx.send(crate::core::stream::LogEvent::GateNeeded {
-                content: turn.content.clone(),
-                gate_type: "planning".to_string(),
-            });
-            match rx.recv() {
-                Ok(crate::core::stream::GateDecision::Continue) => {
-                    log_line(" ✅ Planejamento congelado pelo usuário.".to_string());
-                    db.lock_plan_tasks(plan_id).await.ok();
-                    let config = crate::core::config::Config::load()?;
-                    crate::commands::export_plan_to_markdown(&config.orchestrator_dir, db, plan_id)
-                        .await
-                        .ok();
-                    log_line(" ✅ Planejamento finalizado e exportado.".to_string());
-                    return Ok(());
-                }
-                Ok(crate::core::stream::GateDecision::Review) => {
-                    if let Some(idx) = reviewer_idx {
-                        next_agent_idx = idx;
-                        log_line(" 🔎 Enviando próximo turno ao Revisor...".to_string());
-                    } else {
-                        log_line(
-                            " ⚠ Nenhum Revisor configurado. Voltando ao Arquiteto...".to_string(),
-                        );
-                    }
-                }
-                Ok(crate::core::stream::GateDecision::Enrich(notes)) => {
-                    let hash = crate::core::compute_sha256(&turn.content);
-                    db.add_plan_version(plan_id, &hash, Some(&notes)).await.ok();
-                    db.add_plan_turn(
-                        plan_id,
-                        "human",
-                        "Notas humanas adicionadas no gate de planejamento",
-                        &notes,
-                    )
+                let turn = match run_planning_turn(db, plan_id, agent, role, cli_name, log.clone())
                     .await
-                    .ok();
-                    log_line(" ✏️ Notas aplicadas. Voltando ao Arquiteto...".to_string());
-                }
-                Ok(crate::core::stream::GateDecision::Finalize) => {
-                    log_line(" ✅ Finalizando planejamento...".to_string());
-                    db.lock_plan_tasks(plan_id).await.ok();
-                    let config = crate::core::config::Config::load()?;
-                    crate::commands::export_plan_to_markdown(&config.orchestrator_dir, db, plan_id)
-                        .await
-                        .ok();
-                    log_line(" ✅ Planejamento finalizado e exportado.".to_string());
-                    return Ok(());
-                }
-                Ok(crate::core::stream::GateDecision::Abort) | Err(_) => {
-                    log_line(" 🛑 Planejamento abortado.".to_string());
-                    return Ok(());
-                }
-            }
-        } else {
-            match interactive_plan_gate(orchestrator_dir, db, plan_id, &turn.content).await {
-                Ok(_) => println!(" {} Turno concluído. Avançando...\n", "✔".green()),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("planejamento_finalizado") {
-                        println!(" {} Planejamento finalizado pelo usuário.\n", "✅".green());
-                    } else {
-                        println!(" {} Planejamento abortado pelo usuário.\n", "🛑".red());
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let msg = format!(" ⚠ Turno de {} ({}) falhou: {}", agent, role, e);
+                        log_line(msg.clone());
+                        let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) else {
+                            return Err(e);
+                        };
+                        let _ = tx.send(crate::core::stream::LogEvent::GateNeeded {
+                                content: format!(
+                                    "{}\n\n[C] tenta novamente o mesmo agente. [F] finaliza. [A] aborta.",
+                                    msg.trim()
+                                ),
+                                gate_type: "planning".to_string(),
+                            });
+                        match rx.recv() {
+                            Ok(crate::core::stream::GateDecision::Abort) | Err(_) => {
+                                log_line(
+                                    " 🛑 Planejamento abortado após falha de turno.".to_string(),
+                                );
+                                return Ok(());
+                            }
+                            Ok(crate::core::stream::GateDecision::Finalize) => {
+                                log_line(" ✅ Finalizando planejamento após falha...".to_string());
+                                finalize_planning(db, orchestrator_dir, plan_id).await?;
+                                log_line(" ✅ Planejamento finalizado e exportado.".to_string());
+                                if let Some(ref tx) = log {
+                                    let _ = tx.send(crate::core::stream::LogEvent::PlanningReady {
+                                        plan_id: plan_id.to_string(),
+                                    });
+                                }
+                                return Ok(());
+                            }
+                            Ok(_) => {
+                                log_line(" 🔁 Tentando o turno novamente...".to_string());
+                                continue;
+                            }
+                        }
                     }
-                    return Ok(());
+                };
+
+                if let (Some(ref tx), Some(ref rx)) = (&log, &gate_rx) {
+                    let _ = tx.send(crate::core::stream::LogEvent::GateNeeded {
+                        content: turn.content.clone(),
+                        gate_type: "planning".to_string(),
+                    });
+                    let outcome = match rx.recv() {
+                        Ok(crate::core::stream::GateDecision::Continue)
+                        | Ok(crate::core::stream::GateDecision::Review) => {
+                            PlanningPhaseOutcome::Proceed
+                        }
+                        Ok(crate::core::stream::GateDecision::Enrich(notes)) => {
+                            let hash = crate::core::compute_sha256(&turn.content);
+                            db.add_plan_version(plan_id, &hash, Some(&notes)).await.ok();
+                            db.add_plan_turn(
+                                plan_id,
+                                "human",
+                                "Notas humanas adicionadas no gate de planejamento",
+                                &notes,
+                            )
+                            .await
+                            .ok();
+                            log_line(format!(" ✏️ Notas aplicadas. Reexecutando {}...", role));
+                            continue;
+                        }
+                        Ok(crate::core::stream::GateDecision::Finalize) => {
+                            log_line(" ✅ Finalizando planejamento...".to_string());
+                            finalize_planning(db, orchestrator_dir, plan_id).await?;
+                            log_line(" ✅ Planejamento finalizado e exportado.".to_string());
+                            if let Some(ref tx) = log {
+                                let _ = tx.send(crate::core::stream::LogEvent::PlanningReady {
+                                    plan_id: plan_id.to_string(),
+                                });
+                            }
+                            PlanningPhaseOutcome::Finalized
+                        }
+                        Ok(crate::core::stream::GateDecision::Abort) | Err(_) => {
+                            log_line(" 🛑 Planejamento abortado.".to_string());
+                            PlanningPhaseOutcome::Aborted
+                        }
+                    };
+
+                    match outcome {
+                        PlanningPhaseOutcome::Proceed => break,
+                        PlanningPhaseOutcome::Finalized | PlanningPhaseOutcome::Aborted => {
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    match interactive_plan_gate(orchestrator_dir, db, plan_id, &turn.content).await
+                    {
+                        Ok(_) => break,
+                        Err(e) => {
+                            let msg = e.to_string();
+                            if msg.contains("planejamento_finalizado") {
+                                println!(
+                                    " {} Planejamento finalizado pelo usuário.\n",
+                                    "✅".green()
+                                );
+                            } else {
+                                println!(" {} Planejamento abortado pelo usuário.\n", "🛑".red());
+                            }
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
     }
 
     log_line(format!(
-        "Limite de {} turnos atingido. Planejamento encerrado.",
+        "Limite de {} rodadas atingido. Finalizando planejamento.",
         max_turns
     ));
+    finalize_planning(db, orchestrator_dir, plan_id).await?;
+    log_line(" ✅ Planejamento finalizado e exportado.".to_string());
+    if let Some(ref tx) = log {
+        let _ = tx.send(crate::core::stream::LogEvent::PlanningReady {
+            plan_id: plan_id.to_string(),
+        });
+    }
     Ok(())
 }
 

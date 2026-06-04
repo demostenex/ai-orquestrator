@@ -63,11 +63,7 @@ pub fn render(
 
     // Header: contexto normal, ou banner de confirmação de exclusão em vermelho.
     let (header_text, accent, title) = match confirm {
-        Some(msg) => (
-            format!("\n  {}", msg),
-            Color::Red,
-            " Confirmar Exclusão ",
-        ),
+        Some(msg) => (format!("\n  {}", msg), Color::Red, " Confirmar Exclusão "),
         None => (
             format!("\n  {}\n  {} plano(s) disponível(is)", context, plans.len()),
             Color::Cyan,

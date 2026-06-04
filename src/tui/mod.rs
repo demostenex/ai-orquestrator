@@ -424,8 +424,11 @@ impl PromptState {
             vec![
                 PromptField::cli("CLI para o Arquiteto", false),
                 PromptField::cli("CLI para o Revisor do plano (opcional)", true),
-                PromptField::editor("Briefing humano inicial para o Arquiteto (Enter abre o editor)", false),
-                PromptField::text("Máximo de turnos", false, Some("10")),
+                PromptField::editor(
+                    "Briefing humano inicial para o Arquiteto (Enter abre o editor)",
+                    false,
+                ),
+                PromptField::text("Máximo de rodadas", false, Some("2")),
             ],
             PromptNext::ContinuePlanning { plan_id },
         )
@@ -547,6 +550,17 @@ async fn run_loop(terminal: &mut AppTerminal, app: &mut TuiApp) -> Result<()> {
                             app.exec.gate_content = Some(content);
                             app.exec.gate_type = gate_type;
                             app.view = AppView::Gate;
+                            break;
+                        }
+                        Ok(crate::core::stream::LogEvent::PlanningReady { plan_id }) => {
+                            app.log_rx = None;
+                            app.gate_tx = None;
+                            app.summary = Db::get_home_summary(app.orchestrator_dir.clone())
+                                .await
+                                .unwrap_or_default();
+                            app.plans = load_plans(&app.orchestrator_dir).await;
+                            app.home_memory = load_ai_memory_feed();
+                            app.view = AppView::Prompt(PromptState::for_dev(plan_id));
                             break;
                         }
                         Ok(crate::core::stream::LogEvent::Done) => {
@@ -1095,7 +1109,10 @@ fn run_external_editor(initial: &str) -> Result<String> {
     let editor = resolve_editor()?;
 
     let mut path = std::env::temp_dir();
-    path.push(format!("ai-orchestrator-briefing-{}.md", std::process::id()));
+    path.push(format!(
+        "ai-orchestrator-briefing-{}.md",
+        std::process::id()
+    ));
     {
         let mut f = std::fs::File::create(&path)?;
         f.write_all(initial.as_bytes())?;
@@ -1364,10 +1381,7 @@ fn dispatch_gate(app: &mut TuiApp, key: KeyCode) -> LoopCmd {
                 let prefill = app.exec.gate_content.clone().unwrap_or_default();
                 LoopCmd::GoTo(AppView::Prompt(PromptState::for_enrich(prefill)))
             }
-            KeyCode::Char('c') => LoopCmd::GateDecide(GateDecision::Finalize),
-            KeyCode::Char('r') if app.exec.has_planning_reviewer => {
-                LoopCmd::GateDecide(GateDecision::Review)
-            }
+            KeyCode::Char('c') => LoopCmd::GateDecide(GateDecision::Continue),
             KeyCode::Char('f') => LoopCmd::GateDecide(GateDecision::Finalize),
             KeyCode::Char('a') => LoopCmd::GateDecide(GateDecision::Abort),
             KeyCode::Esc => LoopCmd::Continue,
@@ -1526,7 +1540,9 @@ fn render_prompt(f: &mut Frame, ps: &PromptState, area: Rect) {
             for (i, opt) in ps.cli_options.iter().enumerate() {
                 let selected = i == ps.pick_index;
                 let style = if selected {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 };
@@ -1644,8 +1660,7 @@ fn render_gate(f: &mut Frame, exec: &ExecState, area: Rect) {
     let preview = exec.gate_content.as_deref().unwrap_or("");
     let preview_text: String = preview.lines().take(2).collect::<Vec<_>>().join("\n");
     let gate_options = match exec.gate_type.as_str() {
-        "planning" if exec.has_planning_reviewer => "\n  [E] / Enter  →  Enriquecer antes de outro turno\n  [R]          →  Enviar ao Revisor\n  [C] / [F]    →  Congelar/finalizar planejamento\n  [A]          →  Abortar",
-        "planning" => "\n  [E] / Enter  →  Enriquecer antes de outro turno\n  [C] / [F]    →  Congelar/finalizar planejamento\n  [A]          →  Abortar",
+        "planning" => "\n  [E] / Enter  →  Enriquecer e reexecutar este agente\n  [C]          →  Prosseguir no fluxo da rodada\n  [F]          →  Finalizar planejamento e ir para código\n  [A]          →  Abortar",
         "diff_review" => "\n  [C] / Enter  →  Aprovar diff\n  [E]          →  Enriquecer (notas para o Dev)\n  [A] / Esc    →  Rejeitar diff",
         "apply" => "\n  [C] / Enter  →  Aplicar patch ao workspace\n  [A] / Esc    →  Pular (não aplicar)",
         "inter_task" => "\n  [C] / Enter  →  Próxima tarefa\n  [E]          →  Repetir com notas\n  [A] / Esc    →  Encerrar Dev Mode",
@@ -1724,11 +1739,8 @@ fn render_footer(f: &mut Frame, app: &TuiApp, area: Rect) {
         AppView::Executing => {
             "  Tab: painel   v: lado a lado/pilha   ↑↓/jk/PgUp/PgDn: scroll   y: copiar   q: voltar"
         }
-        AppView::Gate if app.exec.gate_type == "planning" && app.exec.has_planning_reviewer => {
-            "  Enter/E: Enriquecer   R: Revisor   C/F: Congelar   Tab/v/↑↓: painel   y: copiar"
-        }
         AppView::Gate if app.exec.gate_type == "planning" => {
-            "  Enter/E: Enriquecer   C/F: Congelar   Tab/v/↑↓: painel   y: copiar"
+            "  Enter/E: Enriquecer   C: Prosseguir   F: Código   Tab/v/↑↓: painel   y: copiar"
         }
         AppView::Gate => {
             "  C/Enter: Continuar   E: Enriquecer   Tab/v/↑↓: painel   y: copiar   A/Esc: Abortar"

@@ -30,11 +30,17 @@ pub enum LogEvent {
     /// Linha de origem desconhecida (ex.: stdout cru de CLI) → heurística no TUI.
     Line(String),
     /// Linha cujo autor é conhecido na fonte → roteamento estruturado no TUI.
-    AgentLine { text: String, origin: LineOrigin },
+    AgentLine {
+        text: String,
+        origin: LineOrigin,
+    },
     /// gate_type: "planning" | "diff_review" | "apply" | "inter_task" | "error"
     GateNeeded {
         content: String,
         gate_type: String,
+    },
+    PlanningReady {
+        plan_id: String,
     },
     Done,
     Failed(String),
@@ -61,9 +67,18 @@ mod tests {
 
     #[test]
     fn from_role_maps_known_roles_case_insensitively() {
-        assert_eq!(LineOrigin::from_role("architect"), Some(LineOrigin::Architect));
-        assert_eq!(LineOrigin::from_role("Arquiteto"), Some(LineOrigin::Architect));
-        assert_eq!(LineOrigin::from_role("  REVIEWER "), Some(LineOrigin::Reviewer));
+        assert_eq!(
+            LineOrigin::from_role("architect"),
+            Some(LineOrigin::Architect)
+        );
+        assert_eq!(
+            LineOrigin::from_role("Arquiteto"),
+            Some(LineOrigin::Architect)
+        );
+        assert_eq!(
+            LineOrigin::from_role("  REVIEWER "),
+            Some(LineOrigin::Reviewer)
+        );
         assert_eq!(LineOrigin::from_role("dev"), Some(LineOrigin::Dev));
         assert_eq!(LineOrigin::from_role("Auditora"), Some(LineOrigin::Auditor));
     }

@@ -100,11 +100,33 @@ impl CliAdapter for Codex {
     }
 }
 
+/// xAI Grok em modo build não-interativo.
+pub struct GrokBuild;
+impl CliAdapter for GrokBuild {
+    fn id(&self) -> &'static str {
+        "grok"
+    }
+    fn display_name(&self) -> &'static str {
+        "Grok Build"
+    }
+    fn binary(&self) -> &'static str {
+        "grok"
+    }
+    fn command(&self) -> &'static str {
+        "grok build"
+    }
+}
+
 // ── Registro ──────────────────────────────────────────────────────────────────
 
 /// Todos os adapters built-in, na ordem de exibição.
 pub fn builtin_adapters() -> Vec<Box<dyn CliAdapter>> {
-    vec![Box::new(Gemini), Box::new(Claude), Box::new(Codex)]
+    vec![
+        Box::new(Gemini),
+        Box::new(Claude),
+        Box::new(Codex),
+        Box::new(GrokBuild),
+    ]
 }
 
 /// Apenas os adapters cujo binário está disponível no PATH.
@@ -149,7 +171,11 @@ mod tests {
         assert_eq!(resolve_command("codex"), "codex exec --skip-git-repo-check");
         assert_eq!(resolve_command("claude"), "claude -p");
         assert_eq!(resolve_command("gemini"), "gemini");
-        assert_eq!(resolve_command("  codex  "), "codex exec --skip-git-repo-check");
+        assert_eq!(resolve_command("grok"), "grok build");
+        assert_eq!(
+            resolve_command("  codex  "),
+            "codex exec --skip-git-repo-check"
+        );
     }
 
     #[test]
@@ -164,11 +190,13 @@ mod tests {
     #[test]
     fn adapter_for_command_matches_by_binary() {
         assert_eq!(
-            adapter_for_command("codex exec --skip-git-repo-check")
-                .map(|a| a.id()),
+            adapter_for_command("codex exec --skip-git-repo-check").map(|a| a.id()),
             Some("codex")
         );
-        assert_eq!(adapter_for_command("gemini").map(|a| a.id()), Some("gemini"));
+        assert_eq!(
+            adapter_for_command("gemini").map(|a| a.id()),
+            Some("gemini")
+        );
         assert!(adapter_for_command("desconhecida").is_none());
     }
 

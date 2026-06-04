@@ -10,6 +10,7 @@ use crate::core::session::PtySession;
 const KNOWN_CLIS: &[(&str, &str)] = &[
     ("gemini", "Google Gemini CLI"),
     ("claude", "Anthropic Claude CLI"),
+    ("grok", "Grok Build"),
     ("llm", "Simon Willison's LLM CLI"),
     ("aichat", "aichat CLI"),
     ("tgpt", "tgpt CLI"),
